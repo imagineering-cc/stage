@@ -1,17 +1,24 @@
-# Figment
+# Stage
 
 > _"One little spark of inspiration is at the heart of all creation."_
 
-**Figment** is the Imagineering meetup's musical instrument — a Raspberry Pi
-running a tiny Node server that lets every attendee scan a QR code, get a
-playful dragon-coloured identity (Saffron Lark, Indigo Heron, Crimson Hare),
-search YouTube, queue tracks, and watch the room's TV come alive with
-attribution as their music plays.
+**Stage** is **Dreamfinder's third surface** — its body in physical space.
+The room itself, made aware. A Raspberry Pi running a tiny Node server lets
+every meetup attendee scan a QR code, get a playful Dreamfinder handle
+(Saffron Lark, Indigo Heron, Crimson Hare), search YouTube, queue tracks,
+and watch the room's TV come alive with attribution as their music plays.
 
-It is the playful, in-room companion to **Dreamfinder** (the org's Matrix PM
-bot, sibling project at `../dreamfinder/`). Dreamfinder *curates* the org;
-Figment *expresses* the room. Both belong to the EPCOT Imagineering family —
-Figment is Dreamfinder's purple dragon, the embodiment of imagination in flight.
+The three surfaces of Dreamfinder:
+
+- **`dreamfinder/`** — *the brain*. Matrix PM bot. Coordinates the org over chat.
+- **`embodied-dreamfinder/`** — *the face*. 3D avatar with realtime voice.
+- **`stage/`** *(this project)* — *the body in physical space*. The room's
+  awareness — its eyes, ears, voice, and heartbeat at meetups.
+
+Dreamfinder is a golem functioning as a familiar in service of producing
+egregores (see `../.claude/CLAUDE.md`). Stage is where the egregore
+*becomes physical* — where the shared vision takes on light and sound and
+shows the room what the room is doing.
 
 ## Status (last touched 2026-05-02 evening / 2026-05-03 wee hours)
 
@@ -45,8 +52,8 @@ bigger:
 1. **The reframe** that defined the project: the TV isn't a screen, it's the
    room's heartbeat. A *Dreamfinder*-style instrument that scores the meetup —
    currently a jukebox, eventually a sprint timer + visualizer + show-control
-   surface that orchestrates the whole event. (Hence Figment — the playful
-   expression in the room. Also the dragon flies, which seemed thematic.)
+   surface that orchestrates the whole event. The TV becomes the *stage* on
+   which the room's collective work plays.
 2. **Host-minted QR codes** as the identity model — Nick proposed this midway
    through, replacing my "self-minted cards" idea. Much better: the host's act
    of minting becomes a small ritual, no UX friction, no save-this-URL anxiety.
@@ -66,7 +73,7 @@ bigger:
    vendored 20KB qrcode lib.
 6. **The Rick Roll** — when the user reported "I queued another track but it
    didn't play," I queued `dQw4w9WgXcQ` via curl as a diagnostic. It played.
-   Loud. The first track ever played at a Figment-powered meetup is officially
+   Loud. The first track ever played on a Stage-powered system is officially
    _Never Gonna Give You Up_. Going on a t-shirt eventually.
 
 The vibe of the build was excellent — playful, fast, recovered well from
@@ -169,7 +176,7 @@ page works at `http://<pi-tailscale-ip>:3000/admin` from Mac on any network.
 ## Files
 
 ```
-figment/
+stage/
 ├── server.js          # Single-file Node server (~250 lines)
 ├── public/
 │   ├── index.html     # Guest PWA — scan QR → search → queue
@@ -200,7 +207,7 @@ and now-playing. Persistence is a future task (SQLite would suffice).
 
 The deployed copy lives at `~/dreamfinder/` on the Pi (named `dreamfinder`
 historically; that directory is the running instance — leave it for now or
-rename to `figment` next session).
+rename to `stage` next session).
 
 ```bash
 ssh nick@<pi-tailscale-ip>
@@ -238,14 +245,14 @@ In rough priority order:
 2. **Add `/room` route to server.js** — currently the kiosk loads
    `/static/room.html`. Trivial fix; just adds an alias. Server restart
    interrupts mpv though, so do it during a downtime.
-3. **Move project on Pi from `~/dreamfinder/` to `~/figment/`** to match the
+3. **Move project on Pi from `~/dreamfinder/` to `~/stage/`** to match the
    org-side rename. Update launcher script paths.
 4. **systemd user service** for the server + the Chromium kiosk so they
    survive reboots and Nick doesn't have to ssh in every time.
 5. **Persistence** — SQLite store for identities (so attendees can keep their
    handle across meetups) and play history (so we know what was played and
    can build a "play it again" feature).
-6. **Sprint mode** (the *real* Figment feature, ref: captured task #1
+6. **Sprint mode** (the *real* Stage feature, ref: captured task #1
    "Design jukebox-as-meetup-instrument: sprint mode + Dreamfinder framing"):
    - state machine: `free-jukebox` → `sprint-build` → `sprint-share` → `sprint-break`
    - admin controls to start/configure sprints
@@ -268,7 +275,7 @@ In rough priority order:
 
 ## The vision (north star)
 
-Figment is not a music player with extras. It is a **show-control system
+Stage is not a music player with extras. It is a **show-control system
 whose first show is a music jukebox**. Other shows it should run, in roughly
 the order they should ship:
 
@@ -286,8 +293,9 @@ the order they should ship:
   the room.
 
 The *Dreamfinder* family naming convention should be preserved — every show
-the system runs has a name evocative of EPCOT/Imagineering. Figment is the
-first; future modules might be Imagination, Spark, Wonder, etc.
+the system runs has a name evocative of the room's life. Tonight's
+jukebox is the first; future modules might be `sprint`, `welcome`,
+`reflect`, `share`, etc. — each a different *show* the Stage runs.
 
 ## Wins from session 1
 
