@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dreamfinder — Host Console</title>
+  <script src="/static/qrcode.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d12;
+      --surface: #16161f;
+      --border: #2a2a38;
+      --text: #e8e8f0;
+      --muted: #6b6b80;
+      --accent: #a78bfa;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1.5rem 1rem;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    header h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--accent);
+    }
+    header p { color: var(--muted); font-size: 0.85rem; margin-top: 0.25rem; }
+
+    /* ── QR overlay ── */
+    #qr-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(13,13,18,0.96);
+      z-index: 100;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.25rem;
+      padding: 2rem;
+    }
+    #qr-overlay.visible { display: flex; }
+
+    #qr-name {
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      text-align: center;
+    }
+    #qr-canvas {
+      border-radius: 16px;
+      background: #fff;
+      padding: 12px;
+    }
+    #qr-url {
+      font-size: 0.8rem;
+      color: var(--muted);
+      word-break: break-all;
+      text-align: center;
+      max-width: 360px;
+    }
+    #qr-close {
+      margin-top: 0.5rem;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 0.5rem 1.5rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #qr-close:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Mint button ── */
+    #mint-btn {
+      display: block;
+      width: 100%;
+      max-width: 420px;
+      margin: 0 auto 2rem;
+      padding: 1rem;
+      background: var(--accent);
+      color: #0d0d12;
+      font-size: 1rem;
+      font-weight: 700;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    #mint-btn:hover { opacity: 0.9; }
+    #mint-btn:active { transform: scale(0.98); }
+    #mint-btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── Now playing ── */
+    #now-playing {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      max-width: 640px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    #now-playing h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
+
+    .track-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .track-thumb {
+      width: 56px;
+      height: 42px;
+      object-fit: cover;
+      border-radius: 6px;
+      flex-shrink: 0;
+      background: var(--border);
+    }
+    .track-info { flex: 1; min-width: 0; }
+    .track-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .track-requester { font-size: 0.8rem; margin-top: 0.15rem; }
+
+    #skip-btn {
+      flex-shrink: 0;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 0.4rem 0.9rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #skip-btn:hover { border-color: #ef4444; color: #ef4444; }
+
+    #empty-playing { color: var(--muted); font-size: 0.9rem; }
+
+    /* ── Queue ── */
+    #queue-section {
+      max-width: 640px;
+      margin: 0 auto 2rem;
+    }
+    #queue-section h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
+    #queue-list { display: flex; flex-direction: column; gap: 0.5rem; }
+    .queue-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.6rem 0.9rem;
+    }
+
+    /* ── Attendees ── */
+    #attendees-section {
+      max-width: 640px;
+      margin: 0 auto;
+    }
+    #attendees-section h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
+    #attendees-list { display: flex; flex-direction: column; gap: 0.5rem; }
+
+    .attendee-row {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.65rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .color-swatch {
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .attendee-name { flex: 1; font-size: 0.9rem; font-weight: 500; }
+    .show-qr-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 0.3rem 0.7rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .show-qr-btn:hover { border-color: var(--accent); color: var(--accent); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>✦ Dreamfinder</h1>
+    <p>Host console</p>
+  </header>
+
+  <!-- QR overlay -->
+  <div id="qr-overlay">
+    <div id="qr-name"></div>
+    <canvas id="qr-canvas"></canvas>
+    <div id="qr-url"></div>
+    <button id="qr-close" onclick="closeQR()">Done</button>
+  </div>
+
+  <button id="mint-btn" onclick="mintAttendee()">✦ Mint new attendee</button>
+
+  <!-- Now playing -->
+  <section id="now-playing">
+    <h2>Now playing</h2>
+    <div id="now-playing-content">
+      <span id="empty-playing">Nothing playing yet.</span>
+    </div>
+  </section>
+
+  <!-- Queue -->
+  <section id="queue-section">
+    <h2>Up next</h2>
+    <div id="queue-list"><span style="color:var(--muted);font-size:0.9rem;">Queue is empty.</span></div>
+  </section>
+
+  <!-- Attendees -->
+  <section id="attendees-section">
+    <h2>Attendees</h2>
+    <div id="attendees-list"><span style="color:var(--muted);font-size:0.9rem;">No attendees yet.</span></div>
+  </section>
+
+  <script>
+    // API calls use same-origin (relative) so they work whether you open admin
+    // via Tailscale (<pi-tailscale-ip>), LAN (<pi-lan-ip>), or anything else.
+    // The LAN URL is only baked into the QR — that's what guest phones must reach.
+    const API = '';
+    const LAN_URL = `http://192.168.1.171:3000`;
+
+    // ── State ──────────────────────────────────────────────
+    const attendees = []; // {token, name, color}
+
+    // ── SSE ────────────────────────────────────────────────
+    const es = new EventSource(`${API}/api/events`);
+    es.onmessage = (e) => {
+      try { renderPlayback(JSON.parse(e.data)); } catch {}
+    };
+
+    // ── Render playback ───────────────────────────────────
+    function trackHTML(track, showSkip = false) {
+      const img = track.thumbnail
+        ? `<img class="track-thumb" src="${track.thumbnail}" alt="" />`
+        : `<div class="track-thumb"></div>`;
+      const skip = showSkip
+        ? `<button id="skip-btn" onclick="skipTrack()">Skip ›</button>`
+        : '';
+      return `
+        <div class="track-row">
+          ${img}
+          <div class="track-info">
+            <div class="track-title" title="${esc(track.title)}">${esc(track.title)}</div>
+            <div class="track-requester" style="color:${track.color}">${esc(track.requesterName)}</div>
+          </div>
+          ${skip}
+        </div>`;
+    }
+
+    function renderPlayback({ nowPlaying, queue }) {
+      const npEl = document.getElementById('now-playing-content');
+      if (nowPlaying) {
+        npEl.innerHTML = trackHTML(nowPlaying, true);
+      } else {
+        npEl.innerHTML = `<span id="empty-playing">Nothing playing yet.</span>`;
+      }
+
+      const qEl = document.getElementById('queue-list');
+      if (queue && queue.length) {
+        qEl.innerHTML = queue.map(t =>
+          `<div class="queue-item">${trackHTML(t)}</div>`
+        ).join('');
+      } else {
+        qEl.innerHTML = `<span style="color:var(--muted);font-size:0.9rem;">Queue is empty.</span>`;
+      }
+    }
+
+    // ── Mint ───────────────────────────────────────────────
+    async function mintAttendee() {
+      const btn = document.getElementById('mint-btn');
+      btn.disabled = true;
+      try {
+        const res = await fetch(`${API}/api/mint`, { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { token, name, color } = await res.json();
+        attendees.push({ token, name, color });
+        renderAttendees();
+        showQR({ token, name, color });
+      } catch (err) {
+        alert(`Couldn't mint: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // ── QR ─────────────────────────────────────────────────
+    function showQR({ token, name, color }) {
+      const url = `${LAN_URL}/?t=${token}`;
+      document.getElementById('qr-name').textContent = name;
+      document.getElementById('qr-name').style.color = color;
+      document.getElementById('qr-url').textContent = url;
+      // qrcode-generator API: build module matrix, draw to canvas manually.
+      const canvas = document.getElementById('qr-canvas');
+      const qr = qrcode(0, 'M');
+      qr.addData(url);
+      qr.make();
+      const modules = qr.getModuleCount();
+      const target = 340;
+      const cell = Math.floor(target / modules);
+      const size = cell * modules;
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+      ctx.fillStyle = '#000';
+      for (let r = 0; r < modules; r++) {
+        for (let c = 0; c < modules; c++) {
+          if (qr.isDark(r, c)) ctx.fillRect(c * cell, r * cell, cell, cell);
+        }
+      }
+      document.getElementById('qr-overlay').classList.add('visible');
+    }
+
+    function closeQR() {
+      document.getElementById('qr-overlay').classList.remove('visible');
+    }
+
+    // Close overlay on backdrop click
+    document.getElementById('qr-overlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) closeQR();
+    });
+
+    // ── Skip ───────────────────────────────────────────────
+    async function skipTrack() {
+      try {
+        await fetch(`${API}/api/skip`, { method: 'POST' });
+      } catch (err) {
+        alert(`Skip failed: ${err.message}`);
+      }
+    }
+
+    // ── Attendees ──────────────────────────────────────────
+    function renderAttendees() {
+      const el = document.getElementById('attendees-list');
+      if (!attendees.length) {
+        el.innerHTML = `<span style="color:var(--muted);font-size:0.9rem;">No attendees yet.</span>`;
+        return;
+      }
+      el.innerHTML = attendees.map((a, i) => `
+        <div class="attendee-row">
+          <div class="color-swatch" style="background:${a.color}"></div>
+          <div class="attendee-name" style="color:${a.color}">${esc(a.name)}</div>
+          <button class="show-qr-btn" onclick="showQR(attendees[${i}])">QR</button>
+        </div>`).join('');
+    }
+
+    // ── Util ───────────────────────────────────────────────
+    function esc(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>

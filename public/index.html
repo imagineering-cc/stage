@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0f">
+<title>Dreamfinder</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #15151c;
+    --text: #f4f4f8;
+    --muted: #8a8a99;
+    --line: #25252f;
+    --accent: #c8b6ff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  body { padding: 16px 16px 80px 16px; max-width: 640px; margin: 0 auto; }
+
+  header { padding: 12px 4px 20px; }
+  .brand { font-size: 13px; color: var(--muted); letter-spacing: 0.18em; text-transform: uppercase; }
+  .greeting { font-size: 28px; font-weight: 700; margin-top: 8px; line-height: 1.1; }
+  .greeting .name { display: block; }
+  .greeting .you { color: var(--muted); font-weight: 500; font-size: 16px; margin-bottom: 4px; }
+
+  .search-wrap { position: sticky; top: 0; padding: 8px 0 12px; background: linear-gradient(var(--bg) 70%, transparent); z-index: 10; }
+  input[type=search] {
+    width: 100%; padding: 14px 16px; font-size: 17px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 14px;
+    outline: none;
+  }
+  input[type=search]:focus { border-color: var(--accent); }
+
+  .status { font-size: 12px; color: var(--muted); padding: 6px 4px; min-height: 18px; }
+
+  .results { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .result {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 10px; cursor: pointer;
+    transition: transform 0.08s ease, border-color 0.12s ease;
+  }
+  .result:active { transform: scale(0.98); }
+  .result.queued { border-color: var(--accent); }
+  .thumb { width: 80px; height: 60px; border-radius: 8px; object-fit: cover; background: #222; flex-shrink: 0; }
+  .meta { min-width: 0; flex: 1; }
+  .meta .title { font-size: 15px; font-weight: 600; line-height: 1.25;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .meta .channel { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  section.now { margin-top: 28px; }
+  .section-label { font-size: 11px; letter-spacing: 0.18em; color: var(--muted); text-transform: uppercase; padding: 0 4px 8px; }
+  .now-card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 16px; padding: 14px; display: flex; gap: 14px; align-items: center;
+  }
+  .now-card .thumb { width: 88px; height: 66px; }
+  .now-card .title { font-size: 16px; font-weight: 600; line-height: 1.2; }
+  .now-card .by { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .now-card .by .who { font-weight: 600; }
+  .empty { color: var(--muted); font-size: 14px; padding: 14px; background: var(--panel); border: 1px dashed var(--line); border-radius: 14px; text-align: center; }
+
+  .queue { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .qrow {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 8px 10px;
+  }
+  .qrow .thumb { width: 56px; height: 42px; border-radius: 6px; }
+  .qrow .qmeta { min-width: 0; flex: 1; }
+  .qrow .qtitle { font-size: 14px; font-weight: 500; line-height: 1.2;
+    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+  .qrow .qby { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .qrow .qby .who { font-weight: 600; }
+
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--accent); color: #1a1a22; padding: 10px 16px; border-radius: 100px;
+    font-size: 14px; font-weight: 600; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .toast.show { opacity: 1; }
+
+  .err { color: #ff6b8a; padding: 18px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Dreamfinder</div>
+  <div class="greeting">
+    <span class="you">You are</span>
+    <span class="name" id="myname">…</span>
+  </div>
+</header>
+
+<div id="loaderr"></div>
+
+<div class="search-wrap">
+  <input type="search" id="q" placeholder="Search any song on YouTube…" autocomplete="off">
+  <div class="status" id="status"></div>
+</div>
+
+<div class="results" id="results"></div>
+
+<section class="now">
+  <div class="section-label">Now playing</div>
+  <div id="nowwrap"></div>
+</section>
+
+<section class="now">
+  <div class="section-label">Up next</div>
+  <div id="queuewrap"></div>
+</section>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const token = params.get('t');
+let me = null;
+
+async function bootstrap() {
+  if (!token) {
+    document.getElementById('loaderr').innerHTML = '<div class="err">No identity token. Ask the host to mint a QR for you.</div>';
+    return;
+  }
+  try {
+    const r = await fetch(`/api/whoami?t=${encodeURIComponent(token)}`);
+    if (!r.ok) throw new Error('unknown token');
+    me = await r.json();
+    const el = document.getElementById('myname');
+    el.textContent = me.name;
+    el.style.color = me.color;
+    document.documentElement.style.setProperty('--accent', me.color);
+  } catch(e) {
+    document.getElementById('loaderr').innerHTML = '<div class="err">Identity not recognized. Ask the host for a fresh QR.</div>';
+  }
+}
+
+// Search (debounced)
+let searchTimer = null;
+let searchSeq = 0;
+const qEl = document.getElementById('q');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+
+qEl.addEventListener('input', () => {
+  const q = qEl.value.trim();
+  clearTimeout(searchTimer);
+  if (!q) { resultsEl.innerHTML = ''; statusEl.textContent = ''; return; }
+  statusEl.textContent = 'Searching…';
+  searchTimer = setTimeout(() => doSearch(q), 350);
+});
+
+async function doSearch(q) {
+  const seq = ++searchSeq;
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const j = await r.json();
+    if (seq !== searchSeq) return;
+    renderResults(j.results || []);
+    statusEl.textContent = j.results?.length ? `${j.results.length} results` : 'No results';
+  } catch(e) {
+    if (seq !== searchSeq) return;
+    statusEl.textContent = 'Search failed';
+  }
+}
+
+function renderResults(items) {
+  resultsEl.innerHTML = '';
+  for (const it of items) {
+    const div = document.createElement('div');
+    div.className = 'result';
+    div.innerHTML = `
+      <img class="thumb" src="${it.thumbnail}" alt="">
+      <div class="meta">
+        <div class="title"></div>
+        <div class="channel"></div>
+      </div>`;
+    div.querySelector('.title').textContent = it.title || '(untitled)';
+    div.querySelector('.channel').textContent = it.channel || '';
+    div.addEventListener('click', () => queueTrack(it, div));
+    resultsEl.appendChild(div);
+  }
+}
+
+async function queueTrack(it, el) {
+  if (!me) return;
+  el.classList.add('queued');
+  try {
+    const r = await fetch('/api/queue', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, videoId: it.videoId, title: it.title, thumbnail: it.thumbnail }),
+    });
+    if (!r.ok) throw new Error('queue failed');
+    showToast('Queued');
+  } catch(e) {
+    showToast('Failed');
+    el.classList.remove('queued');
+  }
+}
+
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1400);
+}
+
+// SSE for now-playing + queue
+function connectEvents() {
+  const es = new EventSource('/api/events');
+  es.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      renderNow(data.nowPlaying);
+      renderQueue(data.queue || []);
+    } catch(e) {}
+  };
+  es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+function renderNow(np) {
+  const wrap = document.getElementById('nowwrap');
+  if (!np) { wrap.innerHTML = '<div class="empty">Nothing playing yet — pick a track.</div>'; return; }
+  wrap.innerHTML = `
+    <div class="now-card">
+      <img class="thumb" src="${np.thumbnail}" alt="">
+      <div>
+        <div class="title"></div>
+        <div class="by">by <span class="who"></span></div>
+      </div>
+    </div>`;
+  wrap.querySelector('.title').textContent = np.title;
+  const who = wrap.querySelector('.who');
+  who.textContent = np.requesterName;
+  who.style.color = np.color;
+}
+
+function renderQueue(q) {
+  const wrap = document.getElementById('queuewrap');
+  if (!q.length) { wrap.innerHTML = '<div class="empty">Queue is empty.</div>'; return; }
+  wrap.innerHTML = '<div class="queue"></div>';
+  const list = wrap.querySelector('.queue');
+  for (const it of q) {
+    const row = document.createElement('div');
+    row.className = 'qrow';
+    row.innerHTML = `
+      <img class="thumb" src="${it.thumbnail}" alt="">
+      <div class="qmeta">
+        <div class="qtitle"></div>
+        <div class="qby">by <span class="who"></span></div>
+      </div>`;
+    row.querySelector('.qtitle').textContent = it.title;
+    const who = row.querySelector('.who');
+    who.textContent = it.requesterName;
+    who.style.color = it.color;
+    list.appendChild(row);
+  }
+}
+
+bootstrap().then(connectEvents);
+</script>
+</body>
+</html>

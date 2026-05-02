@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dreamfinder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --text-primary: #f0f0f5;
+    --text-muted: rgba(240,240,245,0.45);
+    --queue-h: 200px;
+    --glow-color: hsl(247, 60%, 55%);
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    overflow: hidden;
+    cursor: none;
+    user-select: none;
+  }
+
+  /* ─── IDLE STATE ─────────────────────────────────────── */
+  #idle {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 24px;
+    z-index: 10;
+    transition: opacity 0.8s ease;
+  }
+  #idle.hidden { opacity: 0; pointer-events: none; }
+
+  .idle-bg {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse 80% 60% at 50% 50%,
+      hsl(247,40%,14%) 0%, var(--bg) 70%);
+    animation: idleShift 12s ease-in-out infinite alternate;
+    z-index: 0;
+  }
+  @keyframes idleShift {
+    0%   { background: radial-gradient(ellipse 80% 60% at 30% 40%, hsl(247,40%,14%) 0%, var(--bg) 70%); }
+    33%  { background: radial-gradient(ellipse 80% 60% at 70% 30%, hsl(200,40%,12%) 0%, var(--bg) 70%); }
+    66%  { background: radial-gradient(ellipse 80% 60% at 50% 70%, hsl(280,35%,13%) 0%, var(--bg) 70%); }
+    100% { background: radial-gradient(ellipse 80% 60% at 60% 50%, hsl(220,40%,14%) 0%, var(--bg) 70%); }
+  }
+
+  .idle-content { position: relative; z-index: 1; text-align: center; }
+
+  .wordmark {
+    font-size: 96px;
+    font-weight: 800;
+    letter-spacing: -3px;
+    background: linear-gradient(135deg, #c4b5fd 0%, #818cf8 40%, #38bdf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: wordmarkPulse 6s ease-in-out infinite;
+  }
+  @keyframes wordmarkPulse {
+    0%, 100% { opacity: 0.9; }
+    50%       { opacity: 1; }
+  }
+
+  .idle-sub {
+    margin-top: 20px;
+    font-size: 28px;
+    font-weight: 400;
+    color: var(--text-muted);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+
+  .idle-orb {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: hsl(247,60%,65%);
+    margin: 8px auto 0;
+    animation: orbBreathe 3s ease-in-out infinite;
+    box-shadow: 0 0 12px 4px hsl(247,60%,55%);
+  }
+  @keyframes orbBreathe {
+    0%, 100% { transform: scale(1); opacity: 0.6; }
+    50%       { transform: scale(1.6); opacity: 1; }
+  }
+
+  /* ─── PLAYING STATE ──────────────────────────────────── */
+  #playing {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.8s ease;
+  }
+  #playing.visible { opacity: 1; pointer-events: auto; }
+
+  /* Main area: left thumb + right info */
+  .main-area {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    padding: 56px 64px 32px;
+    gap: 72px;
+    align-items: center;
+  }
+
+  /* ── Now Playing Thumbnail ── */
+  .now-thumb-wrap {
+    flex: 0 0 auto;
+    width: 40%;
+    aspect-ratio: 16/9;
+    border-radius: 20px;
+    overflow: hidden;
+    position: relative;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.06),
+      0 0 80px 20px var(--glow-color),
+      0 24px 60px rgba(0,0,0,0.7);
+    animation: thumbGlow 4s ease-in-out infinite;
+  }
+  @keyframes thumbGlow {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.06), 0 0 60px 14px var(--glow-color), 0 24px 60px rgba(0,0,0,0.7); }
+    50%       { box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 0 100px 30px var(--glow-color), 0 24px 60px rgba(0,0,0,0.7); }
+  }
+
+  .now-thumb {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+    background: var(--surface);
+  }
+
+  /* Inner vignette on thumb */
+  .now-thumb-wrap::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(135deg,
+      rgba(0,0,0,0.15) 0%, transparent 50%, rgba(0,0,0,0.25) 100%);
+    border-radius: 20px;
+  }
+
+  /* ── Now Playing Info ── */
+  .now-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 20px;
+    min-width: 0;
+  }
+
+  .now-label {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .now-title {
+    font-size: clamp(56px, 6.5vw, 120px);
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -2px;
+    color: var(--text-primary);
+    /* clamp to 2 lines */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .now-by {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .now-by-label {
+    font-size: 28px;
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  .now-requester {
+    font-size: 48px;
+    font-weight: 700;
+    /* color set inline via JS */
+    text-shadow: 0 0 40px currentColor;
+  }
+
+  /* ─── QUEUE RIBBON ───────────────────────────────────── */
+  .queue-ribbon {
+    flex: 0 0 var(--queue-h);
+    padding: 0 64px 40px;
+    display: flex;
+    gap: 24px;
+    align-items: flex-end;
+    border-top: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .queue-label-wrap {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding-bottom: 4px;
+  }
+
+  .queue-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    margin-bottom: 8px;
+  }
+
+  .queue-items {
+    display: flex;
+    gap: 20px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    align-items: flex-end;
+  }
+
+  .queue-item {
+    flex: 0 0 auto;
+    width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    opacity: 0;
+    transform: translateY(12px);
+    animation: queueItemIn 0.5s ease forwards;
+  }
+  @keyframes queueItemIn {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .queue-thumb-wrap {
+    width: 100%;
+    aspect-ratio: 16/9;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid rgba(255,255,255,0.07);
+  }
+
+  .queue-thumb {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .queue-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .queue-by {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* requester color set inline */
+  }
+
+  /* ─── TRACK CHANGE OVERLAY ───────────────────────────── */
+  #transition-overlay {
+    position: fixed; inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,10,15,0.92);
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+  }
+  #transition-overlay.show { opacity: 1; }
+
+  .transition-card {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .transition-requester {
+    font-size: 56px;
+    font-weight: 800;
+    /* color set inline */
+    text-shadow: 0 0 60px currentColor;
+  }
+
+  .transition-arrow {
+    font-size: 28px;
+    color: var(--text-muted);
+    letter-spacing: 2px;
+  }
+
+  .transition-title {
+    font-size: 44px;
+    font-weight: 700;
+    color: var(--text-primary);
+    max-width: 900px;
+    text-align: center;
+    line-height: 1.15;
+  }
+</style>
+</head>
+<body>
+
+<!-- ── IDLE ─────────────────────────────────────── -->
+<div id="idle">
+  <div class="idle-bg"></div>
+  <div class="idle-content">
+    <div class="wordmark">Dreamfinder</div>
+    <div class="idle-sub">scan a QR to begin</div>
+    <div class="idle-orb"></div>
+  </div>
+</div>
+
+<!-- ── PLAYING ───────────────────────────────────── -->
+<div id="playing">
+  <div class="main-area">
+    <div class="now-thumb-wrap" id="nowThumbWrap">
+      <img class="now-thumb" id="nowThumb" src="" alt="">
+    </div>
+    <div class="now-info">
+      <div class="now-label">Now Playing</div>
+      <div class="now-title" id="nowTitle"></div>
+      <div class="now-by">
+        <span class="now-by-label">queued by</span>
+        <span class="now-requester" id="nowRequester"></span>
+      </div>
+    </div>
+  </div>
+  <div class="queue-ribbon">
+    <div class="queue-label-wrap">
+      <span class="queue-label">Up next</span>
+    </div>
+    <div class="queue-items" id="queueItems"></div>
+  </div>
+</div>
+
+<!-- ── TRANSITION OVERLAY ────────────────────────── -->
+<div id="transition-overlay">
+  <div class="transition-card">
+    <div class="transition-requester" id="transRequester"></div>
+    <div class="transition-arrow">→</div>
+    <div class="transition-title" id="transTitle"></div>
+  </div>
+</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────
+  let currentTrackId = null;
+  let transitionTimer = null;
+
+  const idleEl      = document.getElementById('idle');
+  const playingEl   = document.getElementById('playing');
+  const nowThumbWrap= document.getElementById('nowThumbWrap');
+  const nowThumb    = document.getElementById('nowThumb');
+  const nowTitle    = document.getElementById('nowTitle');
+  const nowRequester= document.getElementById('nowRequester');
+  const queueItems  = document.getElementById('queueItems');
+  const overlay     = document.getElementById('transition-overlay');
+  const transReq    = document.getElementById('transRequester');
+  const transTitl   = document.getElementById('transTitle');
+
+  // ── Render helpers ─────────────────────────────────────
+  function showIdle() {
+    idleEl.classList.remove('hidden');
+    playingEl.classList.remove('visible');
+  }
+
+  function showPlaying() {
+    idleEl.classList.add('hidden');
+    playingEl.classList.add('visible');
+  }
+
+  function renderNowPlaying(track) {
+    nowThumb.src = track.thumbnail || '';
+    nowTitle.textContent = track.title || '';
+    nowRequester.textContent = track.requesterName || '';
+    nowRequester.style.color = track.color || '#c4b5fd';
+    // glow color on thumb
+    nowThumbWrap.style.setProperty('--glow-color', track.color || 'hsl(247,60%,55%)');
+  }
+
+  function renderQueue(queue) {
+    queueItems.innerHTML = '';
+    const visible = queue.slice(0, 5);
+    visible.forEach((item, i) => {
+      const el = document.createElement('div');
+      el.className = 'queue-item';
+      el.style.animationDelay = `${i * 60}ms`;
+
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'queue-thumb-wrap';
+      const img = document.createElement('img');
+      img.className = 'queue-thumb';
+      img.src = item.thumbnail || '';
+      img.alt = '';
+      thumbWrap.appendChild(img);
+
+      const title = document.createElement('div');
+      title.className = 'queue-title';
+      title.textContent = item.title || '';
+
+      const by = document.createElement('div');
+      by.className = 'queue-by';
+      by.textContent = `by ${item.requesterName || ''}`;
+      by.style.color = item.color || '#c4b5fd';
+
+      el.appendChild(thumbWrap);
+      el.appendChild(title);
+      el.appendChild(by);
+      queueItems.appendChild(el);
+    });
+  }
+
+  // ── Track-change transition ────────────────────────────
+  function showTransition(track) {
+    transReq.textContent = track.requesterName || '';
+    transReq.style.color = track.color || '#c4b5fd';
+    transTitl.textContent = track.title || '';
+
+    overlay.classList.add('show');
+    if (transitionTimer) clearTimeout(transitionTimer);
+    transitionTimer = setTimeout(() => {
+      overlay.classList.remove('show');
+    }, 2800);
+  }
+
+  // ── Main render ────────────────────────────────────────
+  function render({ nowPlaying, queue }) {
+    if (!nowPlaying) {
+      showIdle();
+      currentTrackId = null;
+      return;
+    }
+
+    // Detect track change (not just first load — also actual new track)
+    const isNew = nowPlaying.id !== currentTrackId;
+    if (isNew && currentTrackId !== null) {
+      // Brief overlay before settling
+      showTransition(nowPlaying);
+    }
+    currentTrackId = nowPlaying.id;
+
+    renderNowPlaying(nowPlaying);
+    renderQueue(queue || []);
+    showPlaying();
+  }
+
+  // ── SSE connection ─────────────────────────────────────
+  function connect() {
+    const es = new EventSource('/api/events');
+
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        render(data);
+      } catch (err) {
+        console.warn('Dreamfinder: bad event data', err);
+      }
+    };
+
+    es.onerror = () => {
+      // EventSource auto-reconnects natively; this is just for logging
+      console.warn('Dreamfinder: SSE error — browser will reconnect');
+    };
+
+    // No explicit close — let EventSource handle reconnect lifecycle
+  }
+
+  // ── Boot ───────────────────────────────────────────────
+  connect();
+</script>
+</body>
+</html>
