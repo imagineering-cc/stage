@@ -179,6 +179,7 @@ const server = http.createServer(async (req, res) => {
   // pages
   if (method === 'GET' && p === '/')      return serveStatic(res, 'index.html');
   if (method === 'GET' && p === '/admin') return serveStatic(res, 'admin.html');
+  if (method === 'GET' && p === '/room')  return serveStatic(res, 'room.html');
   if (method === 'GET' && p.startsWith('/static/')) return serveStatic(res, p.slice('/static/'.length));
 
   // who am i (token in query)
@@ -187,6 +188,16 @@ const server = http.createServer(async (req, res) => {
     const id = identities.get(t);
     if (!id) return send(res, 404, { error: 'unknown token' });
     return send(res, 200, { name: id.name, color: id.color });
+  }
+
+  // admin: list all minted attendees (for hydration after admin reload)
+  if (method === 'GET' && p === '/api/attendees') {
+    const out = [];
+    for (const [token, id] of identities) {
+      out.push({ token, name: id.name, color: id.color, mintedAt: id.mintedAt });
+    }
+    out.sort((a, b) => a.mintedAt - b.mintedAt);
+    return send(res, 200, { attendees: out });
   }
 
   // admin: mint a new attendee
