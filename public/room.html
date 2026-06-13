@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dreamfinder</title>
+<script src="/static/qrcode.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -26,6 +27,70 @@
     user-select: none;
   }
 
+  /* ─── LIVE VISUAL CANVAS ─────────────────────────────── */
+  #visual-canvas {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  #visual-vignette {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background:
+      radial-gradient(ellipse 56% 52% at 50% 47%, transparent 0%, rgba(5,6,12,0.17) 54%, rgba(5,6,12,0.68) 100%),
+      linear-gradient(180deg, rgba(4,5,10,0.28), transparent 24%, rgba(4,5,10,0.42));
+  }
+
+  #visual-toast {
+    position: fixed;
+    z-index: 54;
+    right: 46px;
+    bottom: 34px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 48px;
+    max-width: 440px;
+    padding: 0 18px 0 14px;
+    color: var(--text-primary);
+    background: rgba(9,10,17,0.7);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-left: 3px solid var(--event-color, #38bdf8);
+    border-radius: 7px;
+    backdrop-filter: blur(14px);
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 180ms ease, transform 220ms ease;
+    pointer-events: none;
+  }
+  #visual-toast.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .visual-toast-spark {
+    width: 9px;
+    height: 9px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: var(--event-color, #38bdf8);
+    box-shadow: 0 0 18px 5px var(--event-color, #38bdf8);
+  }
+  #visual-toast-label {
+    min-width: 0;
+    overflow: hidden;
+    color: rgba(240,240,245,0.88);
+    font-size: 17px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* ─── IDLE STATE ─────────────────────────────────────── */
   #idle {
     position: fixed; inset: 0;
@@ -40,15 +105,15 @@
   .idle-bg {
     position: fixed; inset: 0;
     background: radial-gradient(ellipse 80% 60% at 50% 50%,
-      hsl(247,40%,14%) 0%, var(--bg) 70%);
+      rgba(92,85,190,0.15) 0%, rgba(10,10,15,0.18) 70%);
     animation: idleShift 12s ease-in-out infinite alternate;
     z-index: 0;
   }
   @keyframes idleShift {
-    0%   { background: radial-gradient(ellipse 80% 60% at 30% 40%, hsl(247,40%,14%) 0%, var(--bg) 70%); }
-    33%  { background: radial-gradient(ellipse 80% 60% at 70% 30%, hsl(200,40%,12%) 0%, var(--bg) 70%); }
-    66%  { background: radial-gradient(ellipse 80% 60% at 50% 70%, hsl(280,35%,13%) 0%, var(--bg) 70%); }
-    100% { background: radial-gradient(ellipse 80% 60% at 60% 50%, hsl(220,40%,14%) 0%, var(--bg) 70%); }
+    0%   { background: radial-gradient(ellipse 80% 60% at 30% 40%, rgba(92,85,190,0.15) 0%, rgba(10,10,15,0.18) 70%); }
+    33%  { background: radial-gradient(ellipse 80% 60% at 70% 30%, rgba(34,142,182,0.13) 0%, rgba(10,10,15,0.18) 70%); }
+    66%  { background: radial-gradient(ellipse 80% 60% at 50% 70%, rgba(143,64,168,0.13) 0%, rgba(10,10,15,0.18) 70%); }
+    100% { background: radial-gradient(ellipse 80% 60% at 60% 50%, rgba(52,99,168,0.14) 0%, rgba(10,10,15,0.18) 70%); }
   }
 
   .idle-content { position: relative; z-index: 1; text-align: center; }
@@ -77,6 +142,29 @@
     text-transform: uppercase;
   }
 
+  .idle-qr-wrap {
+    margin: 34px auto 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+
+  #joinQr {
+    width: 220px;
+    height: 220px;
+    background: #fff;
+    border-radius: 12px;
+    padding: 10px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.45);
+  }
+
+  .idle-url {
+    color: var(--text-muted);
+    font-size: 24px;
+    letter-spacing: 1px;
+  }
+
   .idle-orb {
     width: 8px; height: 8px;
     border-radius: 50%;
@@ -89,6 +177,44 @@
     0%, 100% { transform: scale(1); opacity: 0.6; }
     50%       { transform: scale(1.6); opacity: 1; }
   }
+
+  /* ─── ROOM PHASE ──────────────────────────────────────── */
+  #phase-pill {
+    --phase-color: #818cf8;
+    position: fixed;
+    top: 34px;
+    left: 44px;
+    z-index: 62;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 48px;
+    padding: 0 18px 0 15px;
+    border: 1px solid rgba(255,255,255,0.09);
+    border-left: 3px solid var(--phase-color);
+    border-radius: 7px;
+    background: rgba(18,18,26,0.78);
+    backdrop-filter: blur(12px);
+  }
+  .phase-key {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  #phase-name {
+    color: var(--text-primary);
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: 0;
+  }
+  body[data-mode="welcome"] #phase-pill { --phase-color: #38bdf8; }
+  body[data-mode="free-jukebox"] #phase-pill { --phase-color: #818cf8; }
+  body[data-mode="sprint-build"] #phase-pill { --phase-color: #fbbf24; }
+  body[data-mode="sprint-share"] #phase-pill { --phase-color: #34d399; }
+  body[data-mode="sprint-break"] #phase-pill { --phase-color: #fb7185; }
+  body[data-mode="cool-down"] #phase-pill { --phase-color: #a78bfa; }
 
   /* ─── PLAYING STATE ──────────────────────────────────── */
   #playing {
@@ -188,12 +314,23 @@
     color: var(--text-muted);
   }
 
-  .now-requester {
-    font-size: 48px;
-    font-weight: 700;
-    /* color set inline via JS */
-    text-shadow: 0 0 40px currentColor;
-  }
+	  .now-requester {
+	    font-size: 48px;
+	    font-weight: 700;
+	    /* color set inline via JS */
+	    text-shadow: 0 0 40px currentColor;
+	  }
+	  .now-votes {
+	    display: none;
+	    border: 1px solid rgba(255,255,255,0.12);
+	    border-radius: 12px;
+	    padding: 6px 12px;
+	    color: #fbbf24;
+	    font-size: 24px;
+	    font-weight: 800;
+	    box-shadow: 0 0 28px rgba(251,191,36,0.14);
+	  }
+	  .now-votes.visible { display: inline-flex; }
 
   /* ─── QUEUE RIBBON ───────────────────────────────────── */
   .queue-ribbon {
@@ -247,14 +384,15 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
-  .queue-thumb-wrap {
-    width: 100%;
-    aspect-ratio: 16/9;
-    border-radius: 10px;
-    overflow: hidden;
-    background: var(--surface);
-    border: 1px solid rgba(255,255,255,0.07);
-  }
+	  .queue-thumb-wrap {
+	    width: 100%;
+	    aspect-ratio: 16/9;
+	    border-radius: 10px;
+	    overflow: hidden;
+	    background: var(--surface);
+	    border: 1px solid rgba(255,255,255,0.07);
+	    position: relative;
+	  }
 
   .queue-thumb {
     width: 100%; height: 100%;
@@ -271,14 +409,26 @@
     text-overflow: ellipsis;
   }
 
-  .queue-by {
-    font-size: 12px;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    /* requester color set inline */
-  }
+	  .queue-by {
+	    font-size: 12px;
+	    font-weight: 600;
+	    white-space: nowrap;
+	    overflow: hidden;
+	    text-overflow: ellipsis;
+	    /* requester color set inline */
+	  }
+	  .queue-votes {
+	    position: absolute;
+	    top: 6px;
+	    right: 6px;
+	    padding: 4px 7px;
+	    border-radius: 999px;
+	    background: rgba(10,10,15,0.78);
+	    color: #fbbf24;
+	    font-size: 12px;
+	    font-weight: 900;
+	    box-shadow: 0 0 18px rgba(251,191,36,0.22);
+	  }
 
   /* ─── TRACK CHANGE OVERLAY ───────────────────────────── */
   #transition-overlay {
@@ -323,16 +473,586 @@
     text-align: center;
     line-height: 1.15;
   }
+
+  /* ─── SPOTLIGHT ──────────────────────────────────────── */
+  #spotlight-overlay {
+    --spotlight-color: #38bdf8;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    padding: 106px 62px 58px;
+    overflow: hidden;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    background:
+      radial-gradient(ellipse 58% 50% at 30% 45%, rgba(4,6,12,0.22), rgba(4,6,12,0.72) 80%),
+      linear-gradient(90deg, rgba(5,6,12,0.38), rgba(5,6,12,0.66));
+    transition: opacity 320ms ease, visibility 0s linear 320ms;
+  }
+  #spotlight-overlay.show {
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+  }
+  body.spotlight-on #idle,
+  body.spotlight-on #playing {
+    opacity: 0;
+    pointer-events: none;
+    transition: none;
+  }
+  body.timer-on #spotlight-overlay,
+  body.alarm-on #spotlight-overlay,
+  body.announcement-on #spotlight-overlay {
+    opacity: 0;
+    visibility: hidden;
+  }
+  body.timer-on #visual-toast,
+  body.alarm-on #visual-toast,
+  body.announcement-on #visual-toast {
+    opacity: 0;
+  }
+  .spotlight-heading {
+    position: relative;
+    z-index: 2;
+    margin-left: clamp(0px, 4vw, 72px);
+    max-width: min(64vw, 1000px);
+  }
+  #spotlight-overlay.has-research .spotlight-heading {
+    max-width: calc(100% - min(47vw, 760px) - 86px);
+  }
+  #spotlight-kind {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    color: var(--spotlight-color);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+  #spotlight-kind::before {
+    content: '';
+    width: 36px;
+    height: 2px;
+    background: currentColor;
+    box-shadow: 0 0 16px currentColor;
+  }
+  #spotlight-person {
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: clamp(44px, 5vw, 84px);
+    font-weight: 800;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #spotlight-project {
+    margin-top: 14px;
+    overflow: hidden;
+    color: rgba(240,240,245,0.7);
+    font-size: clamp(22px, 2.3vw, 36px);
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #spoken-words {
+    position: absolute;
+    z-index: 2;
+    left: clamp(56px, 9vw, 150px);
+    right: 54px;
+    top: min(35vh, 350px);
+    bottom: 154px;
+    overflow: hidden;
+  }
+  #spotlight-overlay.has-research #spoken-words {
+    right: min(47vw, 760px);
+  }
+  .spoken-word {
+    position: absolute;
+    left: var(--word-x);
+    top: var(--word-y);
+    max-width: min(58vw, 860px);
+    overflow: hidden;
+    color: rgba(248,248,252,0.96);
+    font-size: clamp(44px, var(--word-size), 102px);
+    font-weight: 760;
+    line-height: 1;
+    letter-spacing: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-shadow: 0 0 44px rgba(0,0,0,0.76), 0 0 54px var(--spotlight-color);
+    opacity: 0;
+    transform: translate(-48px, -3px) scale(0.95);
+    animation: spokenWordDrift 4.4s cubic-bezier(0.18, 0.65, 0.22, 1) var(--word-delay) forwards;
+  }
+  @keyframes spokenWordDrift {
+    0% { opacity: 0; transform: translate(-48px, -3px) scale(0.95); }
+    12% { opacity: 1; transform: translate(0, 0) scale(1); }
+    42% { opacity: 0.94; }
+    100% { opacity: 0; transform: translate(82px, 88px) scale(0.98); }
+  }
+  .spotlight-caption {
+    position: absolute;
+    z-index: 3;
+    left: clamp(62px, 9vw, 150px);
+    bottom: 60px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    width: min(58vw, 980px);
+    min-height: 58px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255,255,255,0.14);
+  }
+  #spotlight-status {
+    flex: 0 0 auto;
+    padding: 7px 11px;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 5px;
+    color: var(--spotlight-color);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  #spotlight-transcript {
+    overflow: hidden;
+    color: rgba(240,240,245,0.67);
+    font-size: 19px;
+    font-weight: 500;
+    line-height: 1.4;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #research-crawl {
+    position: absolute;
+    z-index: 4;
+    top: 104px;
+    right: 54px;
+    bottom: 50px;
+    display: none;
+    width: clamp(360px, 39vw, 640px);
+    padding: 0 30px;
+    color: rgba(237,244,250,0.94);
+  }
+  #spotlight-overlay.has-research #research-crawl { display: block; }
+  .research-label {
+    position: relative;
+    z-index: 2;
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.15);
+    color: var(--spotlight-color);
+    font-size: 12px;
+    font-weight: 750;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+  .crawl-window {
+    position: absolute;
+    inset: 46px 0 0;
+    overflow: hidden;
+    perspective: 780px;
+    mask-image: linear-gradient(180deg, transparent 0%, #000 10%, #000 78%, transparent 100%);
+    -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 10%, #000 78%, transparent 100%);
+  }
+  #research-track {
+    padding: 26px 32px 110px;
+    transform-origin: 50% 100%;
+    animation: researchScroll var(--crawl-duration, 34s) linear infinite;
+  }
+  @keyframes researchScroll {
+    from { transform: rotateX(14deg) translateY(min(23vh, 210px)); }
+    to { transform: rotateX(14deg) translateY(calc(-100% - 120px)); }
+  }
+  .crawl-group {
+    margin-bottom: 34px;
+  }
+  .crawl-title {
+    margin-bottom: 14px;
+    color: rgba(240,240,245,0.56);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .crawl-line {
+    margin: 0 0 16px;
+    color: rgba(246,248,252,0.94);
+    font-size: clamp(18px, 1.5vw, 24px);
+    font-weight: 570;
+    line-height: 1.38;
+  }
+  .crawl-source-title {
+    margin-bottom: 5px;
+    color: var(--spotlight-color);
+    font-size: clamp(18px, 1.45vw, 23px);
+    font-weight: 700;
+    line-height: 1.25;
+  }
+  .crawl-source-host {
+    margin-bottom: 8px;
+    color: rgba(240,240,245,0.48);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .crawl-source-summary {
+    margin-bottom: 22px;
+    color: rgba(240,240,245,0.76);
+    font-size: 17px;
+    line-height: 1.42;
+  }
+  @media (max-width: 1180px) {
+    #spotlight-overlay {
+      padding: 100px 42px 40px;
+    }
+    .spotlight-heading,
+    #spotlight-overlay.has-research .spotlight-heading {
+      margin-left: 0;
+      max-width: calc(100vw - 84px);
+    }
+    #spotlight-overlay.has-research #spoken-words {
+      right: 42px;
+      bottom: 47vh;
+    }
+    #research-crawl {
+      top: auto;
+      right: 34px;
+      bottom: 34px;
+      left: 34px;
+      width: auto;
+      height: 35vh;
+    }
+    .spotlight-caption {
+      left: 42px;
+      bottom: calc(35vh + 44px);
+      width: calc(100% - 84px);
+    }
+    #research-track {
+      animation-name: researchScrollCompact;
+    }
+    @keyframes researchScrollCompact {
+      from { transform: rotateX(9deg) translateY(18px); }
+      to { transform: rotateX(9deg) translateY(calc(-100% - 80px)); }
+    }
+  }
+
+  /* ─── TIMER ───────────────────────────────────────────── */
+  #timer-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 56px 52px 92px;
+    background:
+      radial-gradient(ellipse 56% 52% at 50% 48%, rgba(10,10,15,0.84), rgba(10,10,15,0.40) 60%, rgba(10,10,15,0.08) 100%);
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transform: scale(1.01);
+    transition: opacity 0.32s ease, transform 0.32s ease, visibility 0s linear 0.32s;
+  }
+  #timer-panel.visible {
+    visibility: visible;
+    opacity: 1;
+    transform: scale(1);
+    transition-delay: 0s;
+  }
+  #timer-label {
+    color: var(--text-muted);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    margin-bottom: 32px;
+  }
+  #timer-clock {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    font-variant-numeric: tabular-nums lining-nums;
+  }
+  .flip-digit {
+    position: relative;
+    width: clamp(92px, 15vh, 172px);
+    height: clamp(130px, 22vh, 244px);
+    perspective: 1000px;
+  }
+  .flip-base {
+    position: absolute;
+    inset: 0;
+  }
+  .flip-half {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: calc(50% - 2px);
+    overflow: hidden;
+    color: #f4f1e9;
+    background: linear-gradient(180deg, #22232b 0%, #15161d 100%);
+    border: 1px solid rgba(255,255,255,0.09);
+    box-shadow: inset 0 1px rgba(255,255,255,0.04);
+    backface-visibility: hidden;
+  }
+  .flip-half span {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: calc(200% + 4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Arial Narrow', 'Roboto Condensed', 'Segoe UI', sans-serif;
+    font-size: clamp(94px, 18vh, 202px);
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+    text-shadow: 0 3px 2px rgba(0,0,0,0.7);
+  }
+  .flip-top {
+    top: 0;
+    border-radius: 9px 9px 3px 3px;
+  }
+  .flip-top span {
+    top: 0;
+  }
+  .flip-bottom {
+    bottom: 0;
+    border-radius: 3px 3px 9px 9px;
+    background: linear-gradient(180deg, #14151b 0%, #1d1e26 100%);
+  }
+  .flip-bottom span {
+    bottom: 0;
+  }
+  .flip-digit::after {
+    content: '';
+    position: absolute;
+    z-index: 8;
+    top: 50%;
+    left: 4px;
+    right: 4px;
+    height: 2px;
+    transform: translateY(-1px);
+    background: rgba(0,0,0,0.82);
+    box-shadow: 0 1px rgba(255,255,255,0.04);
+  }
+  .flip-separator {
+    width: clamp(28px, 5vh, 48px);
+    color: rgba(244,241,233,0.86);
+    font-family: 'Arial Narrow', 'Roboto Condensed', 'Segoe UI', sans-serif;
+    font-size: clamp(82px, 14vh, 156px);
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: 0;
+    text-align: center;
+    transform: translateY(-4px);
+  }
+  .flip-hold-bottom {
+    z-index: 2;
+    animation: holdOldBottom 240ms steps(1, end) forwards;
+  }
+  .flip-fold-out {
+    z-index: 4;
+    transform-origin: center bottom;
+    animation: foldTopOut 240ms cubic-bezier(0.44, 0.03, 0.65, 0.34) forwards;
+  }
+  .flip-fold-in {
+    z-index: 5;
+    transform-origin: center top;
+    transform: rotateX(90deg);
+    animation: foldBottomIn 240ms 240ms cubic-bezier(0.2, 0.68, 0.32, 1) forwards;
+  }
+  @keyframes holdOldBottom {
+    0%, 99% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  @keyframes foldTopOut {
+    from { transform: rotateX(0deg); filter: brightness(1); }
+    to { transform: rotateX(-90deg); filter: brightness(0.52); }
+  }
+  @keyframes foldBottomIn {
+    from { transform: rotateX(90deg); filter: brightness(0.54); }
+    to { transform: rotateX(0deg); filter: brightness(1); }
+  }
+  #timer-panel.ended .flip-half {
+    border-color: rgba(251,191,36,0.32);
+    color: #fbbf24;
+    box-shadow: inset 0 1px rgba(255,255,255,0.04), 0 0 42px rgba(251,191,36,0.13);
+  }
+  #timer-progress {
+    position: fixed;
+    z-index: 61;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 12px;
+    background: rgba(255,255,255,0.07);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.3s ease, visibility 0s linear 0.3s;
+  }
+  #timer-progress.visible {
+    visibility: visible;
+    opacity: 1;
+    transition-delay: 0s;
+  }
+  #timer-progress-fill {
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, #38bdf8 0%, #818cf8 62%, #fbbf24 100%);
+    box-shadow: 0 0 20px rgba(129,140,248,0.55);
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 250ms linear;
+  }
+  #timer-progress.ended #timer-progress-fill {
+    background: #fbbf24;
+  }
+
+  #alarm-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,10,15,0.9);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease;
+  }
+  #alarm-overlay.show { opacity: 1; }
+  .alarm-card {
+    text-align: center;
+    color: #fbbf24;
+    text-shadow: 0 0 60px rgba(251,191,36,0.65);
+  }
+  .alarm-title {
+    font-size: clamp(72px, 12vw, 180px);
+    font-weight: 900;
+    line-height: 0.95;
+  }
+  .alarm-sub {
+    margin-top: 20px;
+    color: var(--text-primary);
+    font-size: 34px;
+    font-weight: 600;
+  }
+
+  /* ─── DREAMFINDER ANNOUNCEMENT ───────────────────────── */
+  #announcement-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 64px;
+    background:
+      radial-gradient(ellipse 80% 70% at 50% 45%, rgba(251,191,36,0.18), transparent 65%),
+      rgba(10,10,15,0.94);
+    opacity: 0;
+    pointer-events: none;
+    transform: scale(1.02);
+    transition: opacity 0.35s ease, transform 0.35s ease;
+  }
+  #announcement-overlay.show {
+    opacity: 1;
+    transform: scale(1);
+  }
+  .announcement-card {
+    text-align: center;
+    max-width: 1100px;
+  }
+  .announcement-speaker {
+    font-size: clamp(48px, 7vw, 110px);
+    font-weight: 900;
+    line-height: 1;
+    color: var(--announcement-color, #fbbf24);
+    text-shadow: 0 0 80px currentColor;
+  }
+  .announcement-message {
+    margin-top: 34px;
+    font-size: clamp(60px, 9vw, 150px);
+    font-weight: 900;
+    line-height: 0.98;
+    color: var(--text-primary);
+  }
+  .announcement-detail {
+    margin-top: 28px;
+    color: var(--text-muted);
+    font-size: clamp(26px, 3vw, 48px);
+    font-weight: 600;
+  }
+
+  @keyframes spokenWordReduced {
+    0%, 10% { opacity: 0; }
+    20%, 80% { opacity: 0.92; }
+    100% { opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .idle-bg,
+    .wordmark,
+    .idle-orb,
+    .now-thumb-wrap,
+    .queue-item,
+    .flip-hold-bottom,
+    .flip-fold-out,
+    .flip-fold-in {
+      animation: none !important;
+    }
+    #visual-toast,
+    #spotlight-overlay {
+      transition: none;
+    }
+    .spoken-word {
+      transform: none;
+      animation: spokenWordReduced 2.2s linear var(--word-delay) forwards;
+    }
+    .crawl-window {
+      perspective: none;
+      mask-image: linear-gradient(180deg, #000 0%, #000 82%, transparent 100%);
+      -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 82%, transparent 100%);
+    }
+    #research-track {
+      animation: none;
+      transform: none;
+    }
+  }
 </style>
 </head>
 <body>
+
+<canvas id="visual-canvas" aria-hidden="true"></canvas>
+<div id="visual-vignette" aria-hidden="true"></div>
+<div id="visual-toast" aria-hidden="true">
+  <span class="visual-toast-spark"></span>
+  <span id="visual-toast-label"></span>
+</div>
+
+<div id="phase-pill">
+  <span class="phase-key">Phase</span>
+  <span id="phase-name" aria-live="polite">Stage</span>
+</div>
 
 <!-- ── IDLE ─────────────────────────────────────── -->
 <div id="idle">
   <div class="idle-bg"></div>
   <div class="idle-content">
     <div class="wordmark">Dreamfinder</div>
-    <div class="idle-sub">scan a QR to begin</div>
+    <div class="idle-sub" id="idle-sub">scan to join</div>
+    <div class="idle-qr-wrap">
+      <canvas id="joinQr"></canvas>
+      <div class="idle-url">imagineering.cc/stage</div>
+    </div>
     <div class="idle-orb"></div>
   </div>
 </div>
@@ -344,12 +1064,13 @@
       <img class="now-thumb" id="nowThumb" src="" alt="">
     </div>
     <div class="now-info">
-      <div class="now-label">Now Playing</div>
+      <div class="now-label" id="now-label">Now Playing</div>
       <div class="now-title" id="nowTitle"></div>
-      <div class="now-by">
-        <span class="now-by-label">queued by</span>
-        <span class="now-requester" id="nowRequester"></span>
-      </div>
+	      <div class="now-by">
+	        <span class="now-by-label">queued by</span>
+	        <span class="now-requester" id="nowRequester"></span>
+	        <span class="now-votes" id="nowVotes"></span>
+	      </div>
     </div>
   </div>
   <div class="queue-ribbon">
@@ -369,21 +1090,432 @@
   </div>
 </div>
 
+<div id="spotlight-overlay" aria-live="polite">
+  <div class="spotlight-heading">
+    <div id="spotlight-kind">Spotlight</div>
+    <div id="spotlight-person"></div>
+    <div id="spotlight-project"></div>
+  </div>
+  <div id="spoken-words" aria-hidden="true"></div>
+  <div class="spotlight-caption">
+    <div id="spotlight-status">Live</div>
+    <div id="spotlight-transcript"></div>
+  </div>
+  <aside id="research-crawl" aria-label="Research insights">
+    <div class="research-label">Research signal</div>
+    <div class="crawl-window">
+      <div id="research-track"></div>
+    </div>
+  </aside>
+</div>
+
+<div id="timer-panel" aria-live="off">
+  <div id="timer-label">Sprint</div>
+  <div id="timer-clock" role="timer" aria-label="--:--"></div>
+</div>
+
+<div id="timer-progress" role="progressbar" aria-label="Time remaining" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+  <div id="timer-progress-fill"></div>
+</div>
+
+<div id="alarm-overlay">
+  <div class="alarm-card">
+    <div class="alarm-title">Time</div>
+    <div class="alarm-sub" id="alarm-sub">Sprint ended</div>
+  </div>
+</div>
+
+<div id="announcement-overlay">
+  <div class="announcement-card">
+    <div class="announcement-speaker" id="announcement-speaker">Dreamfinder</div>
+    <div class="announcement-message" id="announcement-message"></div>
+    <div class="announcement-detail" id="announcement-detail"></div>
+  </div>
+</div>
+
 <script>
   // ── State ──────────────────────────────────────────────
+  let joinUrl = 'https://imagineering.cc/stage';
   let currentTrackId = null;
   let transitionTimer = null;
+  let timerState = null;
+  let timerTick = null;
+  let alarmedTimerId = null;
+  let alarmHideTimer = null;
+  let announcementState = null;
+  let timerLayout = '';
+  let displayedTimerId = null;
+  let spotlightState = null;
+  let spotlightSession = '';
+  let spotlightTranscript = '';
+  let spotlightInsightFingerprint = '';
+  let spokenQuestionFingerprint = '';
+  let spokenWordIndex = 0;
+  let seenVisualEventId = null;
+  let visualToastTimer = null;
+
+  const DEFAULT_VISUALS = { theme: 'aurora', energy: 0.46, complexity: 0.48, hue: 247 };
+  const VISUAL_THEMES = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
+  let visualTarget = { ...DEFAULT_VISUALS };
+  let visualCurrent = { ...DEFAULT_VISUALS };
+  let visualWidth = 0;
+  let visualHeight = 0;
+  let visualParticles = [];
+  let visualBursts = [];
+  let visualParticleCount = 0;
+  let lastReducedPaint = 0;
+
+  const MODE_PRESENTATION = {
+    welcome:        { label: 'Welcome',      idle: 'scan to join',         playing: 'Welcome soundtrack' },
+    'free-jukebox': { label: 'Free jukebox', idle: 'scan to choose music', playing: 'Now playing' },
+    'sprint-build': { label: 'Build sprint', idle: 'build in progress',    playing: 'Build soundtrack' },
+    'sprint-share': { label: 'Share',        idle: 'sharing now',          playing: 'Share session' },
+    'sprint-break': { label: 'Break',        idle: 'take a break',         playing: 'Break soundtrack' },
+    'cool-down':    { label: 'Cool down',    idle: 'winding down',         playing: 'Cool down' },
+    stage:          { label: 'Stage',        idle: 'scan to join',         playing: 'Now playing' },
+  };
 
   const idleEl      = document.getElementById('idle');
+  const idleSub     = document.getElementById('idle-sub');
   const playingEl   = document.getElementById('playing');
   const nowThumbWrap= document.getElementById('nowThumbWrap');
-  const nowThumb    = document.getElementById('nowThumb');
-  const nowTitle    = document.getElementById('nowTitle');
-  const nowRequester= document.getElementById('nowRequester');
+	  const nowThumb    = document.getElementById('nowThumb');
+	  const nowLabel    = document.getElementById('now-label');
+	  const nowTitle    = document.getElementById('nowTitle');
+	  const nowRequester= document.getElementById('nowRequester');
+	  const nowVotes    = document.getElementById('nowVotes');
+  const phaseName   = document.getElementById('phase-name');
   const queueItems  = document.getElementById('queueItems');
   const overlay     = document.getElementById('transition-overlay');
   const transReq    = document.getElementById('transRequester');
   const transTitl   = document.getElementById('transTitle');
+  const timerPanel  = document.getElementById('timer-panel');
+  const timerLabel  = document.getElementById('timer-label');
+  const timerClock  = document.getElementById('timer-clock');
+  const timerProgress = document.getElementById('timer-progress');
+  const timerProgressFill = document.getElementById('timer-progress-fill');
+  const alarmOverlay= document.getElementById('alarm-overlay');
+  const alarmSub    = document.getElementById('alarm-sub');
+  const announcementOverlay = document.getElementById('announcement-overlay');
+  const announcementSpeaker = document.getElementById('announcement-speaker');
+  const announcementMessage = document.getElementById('announcement-message');
+  const announcementDetail = document.getElementById('announcement-detail');
+  const visualCanvas = document.getElementById('visual-canvas');
+  const visualContext = visualCanvas.getContext('2d', { alpha: false, desynchronized: true });
+  const visualToast = document.getElementById('visual-toast');
+  const visualToastLabel = document.getElementById('visual-toast-label');
+  const spotlightOverlay = document.getElementById('spotlight-overlay');
+  const spotlightKind = document.getElementById('spotlight-kind');
+  const spotlightPerson = document.getElementById('spotlight-person');
+  const spotlightProject = document.getElementById('spotlight-project');
+  const spotlightStatus = document.getElementById('spotlight-status');
+  const spotlightTranscriptEl = document.getElementById('spotlight-transcript');
+  const spokenWords = document.getElementById('spoken-words');
+  const researchTrack = document.getElementById('research-track');
+  const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let reducedMotion = reducedMotionQuery.matches;
+
+  // ── Animated visual background ─────────────────────────
+  function clamp01(value, fallback) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric)) : fallback;
+  }
+
+  function normaliseHue(value, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return ((numeric % 360) + 360) % 360;
+  }
+
+  function hueColor(hue, saturation, lightness, alpha) {
+    return `hsla(${normaliseHue(hue, 0)}, ${saturation}%, ${lightness}%, ${alpha})`;
+  }
+
+  function safeEventColor(value) {
+    const color = typeof value === 'string' ? value.slice(0, 64) : '';
+    return color && CSS.supports('color', color)
+      ? color
+      : hueColor(visualTarget.hue, 88, 65, 1);
+  }
+
+  function resizeVisualCanvas() {
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+    visualWidth = window.innerWidth;
+    visualHeight = window.innerHeight;
+    visualCanvas.width = Math.max(1, Math.round(visualWidth * pixelRatio));
+    visualCanvas.height = Math.max(1, Math.round(visualHeight * pixelRatio));
+    visualContext.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    refillVisualParticles();
+    lastReducedPaint = 0;
+  }
+
+  function refillVisualParticles() {
+    visualParticleCount = Math.round(18 + visualTarget.complexity * 42);
+    visualParticles = Array.from({ length: visualParticleCount }, (_, index) => ({
+      x: Math.random(),
+      y: Math.random(),
+      size: 0.4 + Math.random() * 2.2,
+      speed: 0.15 + Math.random() * 0.7,
+      drift: (Math.random() - 0.5) * 0.22,
+      phase: Math.random() * Math.PI * 2,
+      hueShift: ((index % 5) - 2) * 13,
+    }));
+  }
+
+  function renderVisuals(nextVisuals) {
+    const next = nextVisuals && typeof nextVisuals === 'object' ? nextVisuals : DEFAULT_VISUALS;
+    const complexity = clamp01(next.complexity, DEFAULT_VISUALS.complexity);
+    visualTarget = {
+      theme: VISUAL_THEMES.has(next.theme) ? next.theme : DEFAULT_VISUALS.theme,
+      energy: clamp01(next.energy, DEFAULT_VISUALS.energy),
+      complexity,
+      hue: normaliseHue(next.hue, DEFAULT_VISUALS.hue),
+    };
+    const targetCount = Math.round(18 + complexity * 42);
+    if (targetCount !== visualParticleCount) refillVisualParticles();
+    spotlightOverlay.style.setProperty('--spotlight-color', hueColor(visualTarget.hue, 86, 67, 1));
+    lastReducedPaint = 0;
+  }
+
+  function hashValue(value) {
+    let hash = 2166136261;
+    for (const character of String(value || 'pulse')) {
+      hash ^= character.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) / 4294967295;
+  }
+
+  function renderVisualEvent(nextEvent) {
+    if (!nextEvent || nextEvent.type !== 'shake' || nextEvent.id === seenVisualEventId) return;
+    seenVisualEventId = nextEvent.id;
+    let createdAt = typeof nextEvent.at === 'string' ? Date.parse(nextEvent.at) : Number(nextEvent.at);
+    if (createdAt > 0 && createdAt < 1000000000000) createdAt *= 1000;
+    if (Number.isFinite(createdAt) && Date.now() - createdAt > 5000) return;
+
+    const intensity = clamp01(nextEvent.intensity, 0.65);
+    const seed = hashValue(nextEvent.id || nextEvent.requesterName);
+    const color = safeEventColor(nextEvent.color);
+    const particleTotal = reducedMotion ? 0 : Math.round(22 + intensity * 50);
+    visualBursts.push({
+      startedAt: performance.now(),
+      duration: reducedMotion ? 950 : 1750,
+      intensity,
+      color,
+      x: visualWidth * (0.2 + seed * 0.6),
+      y: visualHeight * (0.3 + ((seed * 13) % 1) * 0.38),
+      particles: Array.from({ length: particleTotal }, (_, index) => {
+        const angle = (index / Math.max(1, particleTotal)) * Math.PI * 2 + seed;
+        const velocity = 65 + Math.random() * (180 + intensity * 260);
+        return { angle, velocity, radius: 1.5 + Math.random() * 4 };
+      }),
+    });
+
+    visualToast.style.setProperty('--event-color', color);
+    visualToastLabel.textContent = nextEvent.requesterName
+      ? `${String(nextEvent.requesterName).slice(0, 52)} sent a visual pulse`
+      : 'Visual pulse';
+    visualToast.classList.add('show');
+    if (visualToastTimer) clearTimeout(visualToastTimer);
+    visualToastTimer = setTimeout(() => visualToast.classList.remove('show'), 2700);
+    lastReducedPaint = 0;
+  }
+
+  function paintBackdrop(ctx, hue) {
+    const background = ctx.createLinearGradient(0, 0, 0, visualHeight);
+    background.addColorStop(0, hueColor(hue + 8, 40, 8, 1));
+    background.addColorStop(0.56, hueColor(hue - 16, 44, 5, 1));
+    background.addColorStop(1, 'rgb(4, 5, 10)');
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, visualWidth, visualHeight);
+  }
+
+  function paintGlow(ctx, x, y, radius, hue, alpha) {
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    glow.addColorStop(0, hueColor(hue, 86, 60, alpha));
+    glow.addColorStop(0.45, hueColor(hue, 80, 45, alpha * 0.42));
+    glow.addColorStop(1, hueColor(hue, 80, 28, 0));
+    ctx.fillStyle = glow;
+    ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+  }
+
+  function paintAurora(ctx, time, energy, complexity, hue) {
+    ctx.globalCompositeOperation = 'lighter';
+    const bandCount = 2 + Math.round(complexity * 3);
+    for (let band = 0; band < bandCount; band++) {
+      const path = new Path2D();
+      const centerY = visualHeight * (0.18 + band * 0.13);
+      const amplitude = visualHeight * (0.045 + energy * 0.045);
+      for (let x = -80; x <= visualWidth + 80; x += 60) {
+        const wave = Math.sin(x * 0.006 + time * (0.2 + energy * 0.42) + band * 1.7)
+          + Math.sin(x * 0.014 - time * 0.22 + band) * 0.34;
+        const y = centerY + wave * amplitude;
+        if (x === -80) path.moveTo(x, y);
+        else path.lineTo(x, y);
+      }
+      ctx.globalAlpha = 0.14 + energy * 0.1;
+      ctx.lineWidth = visualHeight * (0.09 - band * 0.009);
+      ctx.strokeStyle = hueColor(hue + band * 38, 85, 55, 1);
+      ctx.stroke(path);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function paintNebula(ctx, time, energy, complexity, hue) {
+    const clouds = 3 + Math.round(complexity * 4);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let index = 0; index < clouds; index++) {
+      const phase = index * 1.83;
+      const x = visualWidth * (0.18 + (index % 3) * 0.3)
+        + Math.sin(time * 0.13 + phase) * visualWidth * 0.08;
+      const y = visualHeight * (0.22 + ((index * 0.27) % 0.55))
+        + Math.cos(time * 0.16 + phase) * visualHeight * 0.08;
+      paintGlow(ctx, x, y, visualHeight * (0.22 + energy * 0.12), hue + index * 32, 0.15 + energy * 0.08);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    for (const particle of visualParticles) {
+      const flicker = 0.35 + 0.5 * (0.5 + Math.sin(time * particle.speed + particle.phase) * 0.5);
+      ctx.globalAlpha = flicker;
+      ctx.fillStyle = hueColor(hue + particle.hueShift, 55, 88, 1);
+      ctx.fillRect(particle.x * visualWidth, particle.y * visualHeight, particle.size, particle.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function paintPrism(ctx, time, energy, complexity, hue) {
+    const rays = 4 + Math.round(complexity * 6);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let index = 0; index < rays; index++) {
+      const offset = ((index / rays) + time * (0.012 + energy * 0.028)) % 1;
+      const x = (offset * 1.4 - 0.2) * visualWidth;
+      ctx.beginPath();
+      ctx.moveTo(x, -30);
+      ctx.lineTo(x + visualWidth * (0.08 + energy * 0.05), -30);
+      ctx.lineTo(x - visualWidth * 0.15, visualHeight + 30);
+      ctx.lineTo(x - visualWidth * (0.2 + energy * 0.05), visualHeight + 30);
+      ctx.closePath();
+      ctx.fillStyle = hueColor(hue + index * (150 / rays), 86, 60, 0.055 + energy * 0.035);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 0.2 + energy * 0.12;
+    ctx.strokeStyle = hueColor(hue + 160, 88, 76, 1);
+    ctx.lineWidth = 1;
+    for (let index = 0; index < rays; index++) {
+      const y = ((index / rays + time * 0.02) % 1) * visualHeight;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(visualWidth, y - visualHeight * 0.27);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function paintEmbers(ctx, time, energy, complexity, hue) {
+    const emberHue = hue * 0.25 + 14;
+    paintGlow(ctx, visualWidth * 0.5, visualHeight * 1.05, visualHeight * 0.68, emberHue, 0.2 + energy * 0.08);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const particle of visualParticles) {
+      const rise = (particle.y - time * particle.speed * (0.035 + energy * 0.065) + 2) % 1;
+      const x = particle.x * visualWidth + Math.sin(time * 1.2 + particle.phase) * 32 * particle.drift;
+      const y = rise * visualHeight;
+      const glow = particle.size * (2 + energy * 2);
+      ctx.globalAlpha = 0.28 + (1 - rise) * 0.5;
+      ctx.fillStyle = hueColor(emberHue + particle.hueShift * 0.4, 96, 65, 1);
+      ctx.beginPath();
+      ctx.arc(x, y, glow, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function paintOcean(ctx, time, energy, complexity, hue) {
+    paintGlow(ctx, visualWidth * 0.52, visualHeight * 0.14, visualHeight * 0.58, hue + 30, 0.13 + energy * 0.07);
+    const lines = 5 + Math.round(complexity * 8);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let line = 0; line < lines; line++) {
+      ctx.beginPath();
+      const baseline = visualHeight * (0.22 + line * 0.075);
+      for (let x = -40; x <= visualWidth + 40; x += 48) {
+        const y = baseline
+          + Math.sin(x * 0.012 + time * (0.22 + energy * 0.26) + line * 0.62) * (12 + energy * 16)
+          + Math.sin(x * 0.027 - time * 0.16) * 6;
+        if (x === -40) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = hueColor(hue + line * 7, 78, 60, 0.08 + energy * 0.045);
+      ctx.lineWidth = 2 + (lines - line) * 0.7;
+      ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function paintBursts(ctx, now) {
+    visualBursts = visualBursts.filter((burst) => now - burst.startedAt < burst.duration);
+    for (const burst of visualBursts) {
+      const progress = Math.min(1, (now - burst.startedAt) / burst.duration);
+      const fade = 1 - progress;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = fade * (0.7 + burst.intensity * 0.25);
+      ctx.strokeStyle = burst.color;
+      ctx.lineWidth = 2 + fade * 6;
+      ctx.beginPath();
+      ctx.arc(burst.x, burst.y, 26 + progress * (110 + burst.intensity * 190), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = fade * 0.85;
+      for (const particle of burst.particles) {
+        const distance = particle.velocity * progress;
+        const x = burst.x + Math.cos(particle.angle) * distance;
+        const y = burst.y + Math.sin(particle.angle) * distance + progress * progress * 42;
+        ctx.fillStyle = burst.color;
+        ctx.beginPath();
+        ctx.arc(x, y, particle.radius * (0.5 + fade), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = fade * 0.32;
+      paintGlow(ctx, burst.x, burst.y, 80 + burst.intensity * 150, visualTarget.hue, 0.24);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function animateVisualBackground(now) {
+    requestAnimationFrame(animateVisualBackground);
+    if (reducedMotion && now - lastReducedPaint < 500) return;
+    lastReducedPaint = now;
+    visualCurrent.energy += (visualTarget.energy - visualCurrent.energy) * 0.035;
+    visualCurrent.complexity += (visualTarget.complexity - visualCurrent.complexity) * 0.035;
+    const hueDelta = ((visualTarget.hue - visualCurrent.hue + 540) % 360) - 180;
+    visualCurrent.hue = normaliseHue(visualCurrent.hue + hueDelta * 0.04, visualTarget.hue);
+    const time = reducedMotion ? 0 : now / 1000;
+    const hue = visualCurrent.hue;
+
+    paintBackdrop(visualContext, hue);
+    visualContext.save();
+    const activeBurst = visualBursts[visualBursts.length - 1];
+    if (!reducedMotion && activeBurst) {
+      const age = now - activeBurst.startedAt;
+      if (age < 360) {
+        const shake = (1 - age / 360) * activeBurst.intensity * 7;
+        visualContext.translate(Math.sin(age * 0.28) * shake, Math.cos(age * 0.34) * shake);
+      }
+    }
+    if (visualTarget.theme === 'nebula') paintNebula(visualContext, time, visualCurrent.energy, visualCurrent.complexity, hue);
+    else if (visualTarget.theme === 'prism') paintPrism(visualContext, time, visualCurrent.energy, visualCurrent.complexity, hue);
+    else if (visualTarget.theme === 'embers') paintEmbers(visualContext, time, visualCurrent.energy, visualCurrent.complexity, hue);
+    else if (visualTarget.theme === 'ocean') paintOcean(visualContext, time, visualCurrent.energy, visualCurrent.complexity, hue);
+    else paintAurora(visualContext, time, visualCurrent.energy, visualCurrent.complexity, hue);
+    paintBursts(visualContext, now);
+    visualContext.restore();
+  }
+
+  function updateMotionPreference() {
+    reducedMotion = reducedMotionQuery.matches;
+    document.body.classList.toggle('reduce-motion', reducedMotion);
+    lastReducedPaint = 0;
+  }
 
   // ── Render helpers ─────────────────────────────────────
   function showIdle() {
@@ -396,14 +1528,26 @@
     playingEl.classList.add('visible');
   }
 
-  function renderNowPlaying(track) {
-    nowThumb.src = track.thumbnail || '';
-    nowTitle.textContent = track.title || '';
-    nowRequester.textContent = track.requesterName || '';
-    nowRequester.style.color = track.color || '#c4b5fd';
-    // glow color on thumb
-    nowThumbWrap.style.setProperty('--glow-color', track.color || 'hsl(247,60%,55%)');
+  function renderMode(nextMode) {
+    const mode = Object.prototype.hasOwnProperty.call(MODE_PRESENTATION, nextMode) ? nextMode : 'stage';
+    const presentation = MODE_PRESENTATION[mode];
+    document.body.dataset.mode = mode;
+    phaseName.textContent = presentation.label;
+    idleSub.textContent = presentation.idle;
+    nowLabel.textContent = presentation.playing;
   }
+
+	  function renderNowPlaying(track) {
+	    nowThumb.src = track.thumbnail || '';
+	    nowTitle.textContent = track.title || '';
+	    nowRequester.textContent = track.requesterName || '';
+	    nowRequester.style.color = track.color || '#c4b5fd';
+	    const votes = Number(track.votes || 0);
+	    nowVotes.textContent = votes ? `▲ ${votes}` : '';
+	    nowVotes.classList.toggle('visible', votes > 0);
+	    // glow color on thumb
+	    nowThumbWrap.style.setProperty('--glow-color', track.color || 'hsl(247,60%,55%)');
+	  }
 
   function renderQueue(queue) {
     queueItems.innerHTML = '';
@@ -418,8 +1562,15 @@
       const img = document.createElement('img');
       img.className = 'queue-thumb';
       img.src = item.thumbnail || '';
-      img.alt = '';
-      thumbWrap.appendChild(img);
+	      img.alt = '';
+	      thumbWrap.appendChild(img);
+	      const votes = Number(item.votes || 0);
+	      if (votes) {
+	        const badge = document.createElement('div');
+	        badge.className = 'queue-votes';
+	        badge.textContent = `▲ ${votes}`;
+	        thumbWrap.appendChild(badge);
+	      }
 
       const title = document.createElement('div');
       title.className = 'queue-title';
@@ -437,8 +1588,385 @@
     });
   }
 
+  // ── Join QR ────────────────────────────────────────────
+  function drawJoinQR() {
+    const canvas = document.getElementById('joinQr');
+    const qr = qrcode(0, 'M');
+    qr.addData(joinUrl);
+    qr.make();
+    const modules = qr.getModuleCount();
+    const target = 220;
+    const cell = Math.floor(target / modules);
+    const size = cell * modules;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = '#000';
+    for (let r = 0; r < modules; r++) {
+      for (let c = 0; c < modules; c++) {
+        if (qr.isDark(r, c)) ctx.fillRect(c * cell, r * cell, cell, cell);
+      }
+    }
+  }
+
+  async function loadConfig() {
+    try {
+      const response = await fetch('/api/config');
+      if (!response.ok) return;
+      const config = await response.json();
+      if (config.joinUrl) {
+        joinUrl = config.joinUrl;
+        drawJoinQR();
+      }
+    } catch {}
+  }
+
+  // ── Timer ──────────────────────────────────────────────
+  function renderTimer(nextTimer) {
+    timerState = nextTimer || null;
+    document.body.classList.toggle('timer-on', Boolean(timerState));
+    if (!timerTick) timerTick = setInterval(updateTimerClock, 250);
+    updateTimerClock();
+
+    if (timerState?.status === 'ended' && alarmedTimerId !== timerState.id) {
+      alarmedTimerId = timerState.id;
+      showAlarm(timerState);
+    }
+  }
+
+  function updateTimerClock() {
+    if (!timerState) {
+      timerPanel.classList.remove('visible', 'ended');
+      timerProgress.classList.remove('visible', 'ended');
+      timerProgressFill.style.transform = 'scaleX(0)';
+      timerProgress.setAttribute('aria-valuenow', '0');
+      timerClock.replaceChildren();
+      timerClock.setAttribute('aria-label', '--:--');
+      timerLayout = '';
+      displayedTimerId = null;
+      return;
+    }
+    const isNewTimer = displayedTimerId !== timerState.id;
+    const remainingMs = timerState.status === 'ended'
+      ? 0
+      : Math.max(0, timerState.endsAt - Date.now());
+    const durationMs = Math.max(1, Number(timerState.durationMs) || (timerState.endsAt - timerState.startedAt) || 1);
+    const remainingRatio = Math.max(0, Math.min(1, remainingMs / durationMs));
+
+    timerPanel.classList.add('visible');
+    timerPanel.classList.toggle('ended', timerState.status === 'ended');
+    timerProgress.classList.add('visible');
+    timerProgress.classList.toggle('ended', timerState.status === 'ended');
+    timerProgressFill.style.transform = `scaleX(${remainingRatio})`;
+    timerProgress.setAttribute('aria-valuenow', String(Math.round(remainingRatio * 100)));
+    timerLabel.textContent = timerState.label || 'Timer';
+    renderFlipClock(formatDuration(remainingMs, durationMs), !isNewTimer);
+    displayedTimerId = timerState.id;
+  }
+
+  function formatDuration(ms, durationMs) {
+    const total = Math.ceil(ms / 1000);
+    if (durationMs >= 60 * 60 * 1000) {
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function renderFlipClock(value, animate) {
+    const layout = value.replace(/[0-9]/g, '#');
+    if (timerLayout !== layout) {
+      timerClock.replaceChildren();
+      for (const character of value) {
+        if (character === ':') {
+          const separator = document.createElement('div');
+          separator.className = 'flip-separator';
+          separator.textContent = ':';
+          timerClock.appendChild(separator);
+        } else {
+          timerClock.appendChild(createDigit(character));
+        }
+      }
+      timerLayout = layout;
+      animate = false;
+    }
+
+    const digits = timerClock.querySelectorAll('.flip-digit');
+    const values = value.replace(/:/g, '');
+    digits.forEach((digit, index) => updateDigit(digit, values[index], animate));
+    timerClock.setAttribute('aria-label', value);
+  }
+
+  function createDigit(value) {
+    const digit = document.createElement('div');
+    digit.className = 'flip-digit';
+    digit.dataset.value = value;
+    const base = document.createElement('div');
+    base.className = 'flip-base';
+    base.appendChild(createHalf('flip-top', value));
+    base.appendChild(createHalf('flip-bottom', value));
+    digit.appendChild(base);
+    return digit;
+  }
+
+  function createHalf(className, value) {
+    const half = document.createElement('div');
+    half.className = `flip-half ${className}`;
+    const content = document.createElement('span');
+    content.textContent = value;
+    half.appendChild(content);
+    return half;
+  }
+
+  function updateDigit(digit, value, animate) {
+    const previous = digit.dataset.value;
+    if (previous === value) return;
+    digit.querySelectorAll('.flip-hold-bottom, .flip-fold-out, .flip-fold-in').forEach((leaf) => leaf.remove());
+    digit.querySelectorAll('.flip-base span').forEach((content) => {
+      content.textContent = value;
+    });
+    digit.dataset.value = value;
+    if (!animate || !previous) return;
+
+    const holdBottom = createHalf('flip-bottom flip-hold-bottom', previous);
+    const foldOut = createHalf('flip-top flip-fold-out', previous);
+    const foldIn = createHalf('flip-bottom flip-fold-in', value);
+    digit.appendChild(holdBottom);
+    digit.appendChild(foldOut);
+    digit.appendChild(foldIn);
+    setTimeout(() => {
+      holdBottom.remove();
+      foldOut.remove();
+      foldIn.remove();
+    }, 520);
+  }
+
+  function showAlarm(timer) {
+    alarmSub.textContent = `${timer.label || 'Timer'} ended`;
+    alarmOverlay.classList.add('show');
+    document.body.classList.add('alarm-on');
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    playAlarm();
+    if (alarmHideTimer) clearTimeout(alarmHideTimer);
+    alarmHideTimer = setTimeout(() => {
+      alarmOverlay.classList.remove('show');
+      document.body.classList.remove('alarm-on');
+    }, 7000);
+  }
+
+  function playAlarm() {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    try {
+      const ctx = new AudioContext();
+      const now = ctx.currentTime;
+      [880, 660, 880, 660, 990].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, now + i * 0.32);
+        gain.gain.exponentialRampToValueAtTime(0.28, now + i * 0.32 + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.32 + 0.22);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + i * 0.32);
+        osc.stop(now + i * 0.32 + 0.24);
+      });
+      setTimeout(() => ctx.close(), 2400);
+    } catch {}
+  }
+
+  // ── Announcements ──────────────────────────────────────
+  function renderAnnouncement(nextAnnouncement) {
+    announcementState = nextAnnouncement || null;
+    document.body.classList.toggle('announcement-on', Boolean(announcementState));
+    if (!announcementState) {
+      announcementOverlay.classList.remove('show');
+      return;
+    }
+    announcementOverlay.style.setProperty('--announcement-color', announcementState.color || '#fbbf24');
+    announcementSpeaker.textContent = announcementState.title || 'Dreamfinder';
+    announcementMessage.textContent = announcementState.message || '';
+    announcementDetail.textContent = announcementState.detail || '';
+    announcementOverlay.classList.add('show');
+  }
+
+  // ── Spotlight presentation ─────────────────────────────
+  function transcriptWords(text) {
+    return String(text || '').trim().match(/\S+/g) || [];
+  }
+
+  function getArrivingWords(previous, current) {
+    const incoming = transcriptWords(current);
+    const existing = transcriptWords(previous);
+    if (!existing.length) return incoming.slice(-5);
+    let shared = 0;
+    while (shared < existing.length && shared < incoming.length && existing[shared] === incoming[shared]) {
+      shared += 1;
+    }
+    return incoming.slice(shared).slice(-10);
+  }
+
+  function clearSpokenWords() {
+    spokenWords.replaceChildren();
+    spokenWordIndex = 0;
+  }
+
+  function animateSpokenWords(words) {
+    words.forEach((word, index) => {
+      const leaf = document.createElement('span');
+      const lane = spokenWordIndex % 4;
+      const x = 3 + (spokenWordIndex * 19) % (spotlightOverlay.classList.contains('has-research') ? 40 : 62);
+      leaf.className = 'spoken-word';
+      leaf.textContent = String(word).slice(0, 32);
+      leaf.style.setProperty('--word-x', `${x}%`);
+      leaf.style.setProperty('--word-y', `${lane * 19}%`);
+      leaf.style.setProperty('--word-size', `${54 + ((spokenWordIndex * 11) % 34)}px`);
+      leaf.style.setProperty('--word-delay', `${index * 80}ms`);
+      leaf.addEventListener('animationend', () => leaf.remove(), { once: true });
+      spokenWords.appendChild(leaf);
+      spokenWordIndex += 1;
+    });
+    while (spokenWords.children.length > 16) spokenWords.firstElementChild.remove();
+  }
+
+  function transcriptCaption(text) {
+    const flattened = String(text || '').replace(/\s+/g, ' ').trim();
+    if (flattened.length <= 150) return flattened;
+    return `...${flattened.slice(-147)}`;
+  }
+
+  function appendCrawlGroup(label, entries) {
+    if (!entries.length) return;
+    const group = document.createElement('section');
+    group.className = 'crawl-group';
+    const heading = document.createElement('h3');
+    heading.className = 'crawl-title';
+    heading.textContent = label;
+    group.appendChild(heading);
+    for (const entry of entries) {
+      const line = document.createElement('p');
+      line.className = 'crawl-line';
+      line.textContent = entry;
+      group.appendChild(line);
+    }
+    researchTrack.appendChild(group);
+  }
+
+  function renderResearchCrawl(insights) {
+    const clean = insights && typeof insights === 'object' ? insights : {};
+    const questions = Array.isArray(clean.questions) ? clean.questions.filter(Boolean).slice(0, 5).map((text) => String(text).slice(0, 240)) : [];
+    const directions = Array.isArray(clean.directions) ? clean.directions.filter(Boolean).slice(0, 5).map((text) => String(text).slice(0, 240)) : [];
+    const connections = Array.isArray(clean.connections) ? clean.connections.filter(Boolean).slice(0, 5).map((text) => String(text).slice(0, 240)) : [];
+    const sources = Array.isArray(clean.sources) ? clean.sources.filter(Boolean).slice(0, 5) : [];
+    const fingerprint = JSON.stringify({ questions, directions, connections, sources });
+    const hasResearch = questions.length || directions.length || connections.length || sources.length;
+    spotlightOverlay.classList.toggle('has-research', Boolean(hasResearch));
+    if (fingerprint === spotlightInsightFingerprint) return;
+    spotlightInsightFingerprint = fingerprint;
+    researchTrack.replaceChildren();
+    if (!hasResearch) return;
+
+    appendCrawlGroup('Questions forming', questions);
+    appendCrawlGroup('Directions', directions);
+    appendCrawlGroup('Connections', connections);
+    if (sources.length) {
+      const group = document.createElement('section');
+      group.className = 'crawl-group';
+      const heading = document.createElement('h3');
+      heading.className = 'crawl-title';
+      heading.textContent = 'Sources';
+      group.appendChild(heading);
+      for (const item of sources) {
+        const title = document.createElement('div');
+        title.className = 'crawl-source-title';
+        title.textContent = String(item.title || 'Reference').slice(0, 140);
+        group.appendChild(title);
+        if (item.url) {
+          try {
+            const host = document.createElement('div');
+            host.className = 'crawl-source-host';
+            host.textContent = new URL(String(item.url)).hostname.replace(/^www\./, '');
+            group.appendChild(host);
+          } catch {}
+        }
+        if (item.summary) {
+          const summary = document.createElement('p');
+          summary.className = 'crawl-source-summary';
+          summary.textContent = String(item.summary).slice(0, 300);
+          group.appendChild(summary);
+        }
+      }
+      researchTrack.appendChild(group);
+    }
+    const entryCount = questions.length + directions.length + connections.length + sources.length;
+    researchTrack.style.setProperty('--crawl-duration', `${Math.min(58, Math.max(24, 18 + entryCount * 4))}s`);
+  }
+
+  function speakSpotlightQuestion(next) {
+    const question = next?.isFinal && Array.isArray(next.insights?.questions)
+      ? String(next.insights.questions[0] || '').trim()
+      : '';
+    const fingerprint = `${next?.id || ''}|${question}`;
+    if (!question || fingerprint === spokenQuestionFingerprint || timerState || announcementState) return;
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') return;
+    spokenQuestionFingerprint = fingerprint;
+    try {
+      const utterance = new SpeechSynthesisUtterance(question.slice(0, 280));
+      utterance.rate = 0.94;
+      utterance.pitch = 0.98;
+      utterance.volume = 0.46;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
+    } catch {}
+  }
+
+  function renderSpotlight(nextSpotlight) {
+    const next = nextSpotlight && nextSpotlight.active ? nextSpotlight : null;
+    spotlightState = next;
+    document.body.classList.toggle('spotlight-on', Boolean(next));
+    spotlightOverlay.classList.toggle('show', Boolean(next));
+    if (!next) {
+      spotlightSession = '';
+      spotlightTranscript = '';
+      spotlightInsightFingerprint = '';
+      spokenQuestionFingerprint = '';
+      spotlightOverlay.classList.remove('has-research');
+      researchTrack.replaceChildren();
+      clearSpokenWords();
+      return;
+    }
+
+    const session = `${next.kind || ''}|${next.participantName || ''}|${next.projectTitle || ''}`;
+    const transcript = String(next.transcript || '');
+    const isNewSession = session !== spotlightSession;
+    if (isNewSession) {
+      clearSpokenWords();
+      spotlightTranscript = '';
+      spotlightInsightFingerprint = '';
+    }
+    spotlightSession = session;
+    spotlightKind.textContent = next.kind === 'introduction' ? 'Introduction spotlight' : 'Progress spotlight';
+    spotlightPerson.textContent = String(next.participantName || 'Participant').slice(0, 100);
+    spotlightProject.textContent = String(next.projectTitle || '').slice(0, 150);
+    spotlightStatus.textContent = String(next.status || (next.isFinal ? 'Final' : 'Live')).slice(0, 24);
+    spotlightTranscriptEl.textContent = transcriptCaption(transcript);
+    renderResearchCrawl(next.insights);
+    speakSpotlightQuestion(next);
+    animateSpokenWords(getArrivingWords(spotlightTranscript, transcript));
+    spotlightTranscript = transcript;
+    overlay.classList.remove('show');
+  }
+
   // ── Track-change transition ────────────────────────────
   function showTransition(track) {
+    if (spotlightState?.active) return;
     transReq.textContent = track.requesterName || '';
     transReq.style.color = track.color || '#c4b5fd';
     transTitl.textContent = track.title || '';
@@ -451,7 +1979,14 @@
   }
 
   // ── Main render ────────────────────────────────────────
-  function render({ nowPlaying, queue }) {
+  function render({ nowPlaying, queue, timer, announcement, mode, visuals, visualEvent, spotlight }) {
+    renderVisuals(visuals);
+    renderVisualEvent(visualEvent);
+    renderMode(mode);
+    renderTimer(timer);
+    renderAnnouncement(announcement);
+    renderSpotlight(spotlight);
+
     if (!nowPlaying) {
       showIdle();
       currentTrackId = null;
@@ -473,7 +2008,7 @@
 
   // ── SSE connection ─────────────────────────────────────
   function connect() {
-    const es = new EventSource('/api/events');
+    const es = new EventSource('/api/show-events');
 
     es.onmessage = (e) => {
       try {
@@ -493,6 +2028,17 @@
   }
 
   // ── Boot ───────────────────────────────────────────────
+  resizeVisualCanvas();
+  updateMotionPreference();
+  window.addEventListener('resize', resizeVisualCanvas);
+  if (typeof reducedMotionQuery.addEventListener === 'function') {
+    reducedMotionQuery.addEventListener('change', updateMotionPreference);
+  } else {
+    reducedMotionQuery.addListener(updateMotionPreference);
+  }
+  requestAnimationFrame(animateVisualBackground);
+  drawJoinQR();
+  loadConfig();
   connect();
 </script>
 </body>

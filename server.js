@@ -17,6 +17,7 @@ const STATE_FILE = process.env.STAGE_STATE_FILE || path.join(__dirname, 'stage-s
 const HISTORY_LIMIT = 200;
 const AUDIO_ENABLED = process.env.STAGE_NO_AUDIO !== '1';
 const JOIN_URL = process.env.STAGE_JOIN_URL || 'https://imagineering.cc/stage';
+const VISUAL_THEMES = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
 
 // --- name generator (Dreamfinder handles) ---
 const ADJECTIVES = ['Indigo','Velvet','Crimson','Silver','Golden','Cobalt','Amber','Jade','Coral','Ivory','Onyx','Ruby','Saffron','Azure','Verdant','Lilac','Russet','Ochre','Pearl','Obsidian'];
@@ -61,6 +62,9 @@ const lastPlayedRequesterByVotes = savedState.lastPlayedRequesterByVotes &&
   ? { ...savedState.lastPlayedRequesterByVotes }
   : { 0: savedState.lastPlayedRequesterToken || null };
 const sseClients = new Set(); // { res, includeSpotlight } stream clients
+let visuals = normalizeVisuals(savedState.visuals);
+let visualEvent = null;       // short-lived phone gesture effect; never persisted
+const gestureTimes = new Map();
 
 function clamp(value, min, max, fallback) {
   const number = Number(value);
@@ -81,6 +85,18 @@ function identityDisplayName(id) {
   return handle ? `@${handle}` : cleanText(id?.name, 60);
 }
 
+function normalizeVisuals(value) {
+  const data = value && typeof value === 'object' ? value : {};
+  return {
+    theme: VISUAL_THEMES.has(data.theme) ? data.theme : 'aurora',
+    energy: clamp(data.energy, 0, 1, 0.56),
+    complexity: clamp(data.complexity, 0, 1, 0.62),
+    hue: Math.round(clamp(data.hue, 0, 360, 212)),
+    editedBy: cleanText(data.editedBy, 60),
+    editedAt: Number(data.editedAt) || null,
+  };
+}
+
 function savePersistentState() {
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   const data = JSON.stringify({
@@ -88,6 +104,7 @@ function savePersistentState() {
     playHistory,
     queue,
     lastPlayedRequesterByVotes,
+    visuals,
   }, null, 2);
   try {
     fs.writeFileSync(tmp, data, { mode: 0o600 });
@@ -131,8 +148,17 @@ function participantProfile(id) {
     name: identityDisplayName(id),
     dreamfinderName: id.name,
     color: id.color,
+    projectTitle: cleanText(id.projectTitle, 100),
+    projectDescription: cleanText(id.projectDescription, 420),
     githubHandle: normalizeGithubHandle(id.githubHandle),
+    consentRecording: id.consentRecording === true,
+    consentResearch: id.consentResearch === true,
   };
+}
+
+function currentVisualEvent() {
+  if (visualEvent && Date.now() - visualEvent.at > 5000) visualEvent = null;
+  return visualEvent;
 }
 
 function rotateRequesterOrder(tokens, votes) {
@@ -187,6 +213,8 @@ function statePayload({ includeSpotlight = false } = {}) {
   const payload = {
     nowPlaying: publicTrack(nowPlaying),
     queue: publicQueue(),
+    visuals,
+    visualEvent: currentVisualEvent(),
   };
   return payload;
 }
@@ -384,6 +412,61 @@ const server = http.createServer(async (req, res) => {
   // guest: self-join and receive an identity
   if (method === 'POST' && p === '/api/join') {
     return send(res, 200, createIdentity());
+  }
+
+  // guest: opt-in project profile used by spotlight and evidence searches
+  if (method === 'POST' && p === '/api/profile') {
+    const body = await readBody(req);
+    const id = identities.get(body.token);
+    if (!id) return send(res, 401, { error: 'unknown token' });
+    id.projectTitle = cleanText(body.projectTitle, 100);
+    id.projectDescription = cleanText(body.projectDescription, 420);
+    id.githubHandle = normalizeGithubHandle(body.githubHandle);
+    id.consentRecording = body.consentRecording === true;
+    id.consentResearch = body.consentResearch === true;
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { ok: true, profile: participantProfile(id) });
+  }
+
+  // guest: evolve the room's generative animation controls
+  if (method === 'POST' && p === '/api/visuals') {
+    const body = await readBody(req);
+    const id = identities.get(body.token);
+    if (!id) return send(res, 401, { error: 'unknown token' });
+    visuals = normalizeVisuals({
+      ...visuals,
+      theme: body.theme ?? visuals.theme,
+      energy: body.energy ?? visuals.energy,
+      complexity: body.complexity ?? visuals.complexity,
+      hue: body.hue ?? visuals.hue,
+      editedBy: identityDisplayName(id),
+      editedAt: Date.now(),
+    });
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { visuals });
+  }
+
+  // guest: phone motion triggers a short visual response, rate-limited per person
+  if (method === 'POST' && p === '/api/gesture') {
+    const body = await readBody(req);
+    const id = identities.get(body.token);
+    if (!id) return send(res, 401, { error: 'unknown token' });
+    if (body.type !== 'shake') return send(res, 400, { error: 'unknown gesture' });
+    const lastAt = gestureTimes.get(body.token) || 0;
+    if (Date.now() - lastAt < 900) return send(res, 429, { error: 'shake too frequent' });
+    gestureTimes.set(body.token, Date.now());
+    visualEvent = {
+      id: crypto.randomBytes(4).toString('hex'),
+      type: 'shake',
+      intensity: clamp(body.intensity, 0, 1, 0.5),
+      color: id.color,
+      requesterName: identityDisplayName(id),
+      at: Date.now(),
+    };
+    broadcast();
+    return send(res, 200, { ok: true, visualEvent });
   }
 
   // search

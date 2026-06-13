@@ -76,10 +76,182 @@
   }
   .qrow .thumb { width: 56px; height: 42px; border-radius: 6px; }
   .qrow .qmeta { min-width: 0; flex: 1; }
-  .qrow .qtitle { font-size: 14px; font-weight: 500; line-height: 1.2;
-    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
-  .qrow .qby { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .qrow .qby .who { font-weight: 600; }
+	  .qrow .qtitle { font-size: 14px; font-weight: 500; line-height: 1.2;
+	    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+	  .qrow .qby { font-size: 11px; color: var(--muted); margin-top: 2px; }
+	  .qrow .qby .who { font-weight: 600; }
+	  .vote-btn {
+	    width: 46px; height: 42px; flex: 0 0 46px;
+	    display: flex; flex-direction: column; align-items: center; justify-content: center;
+	    gap: 1px; border: 1px solid var(--line); border-radius: 10px;
+	    background: transparent; color: var(--muted);
+	    font: inherit; font-weight: 800; cursor: pointer;
+	    transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+	  }
+	  .vote-btn .arrow { font-size: 12px; line-height: 1; }
+	  .vote-btn .count { font-size: 13px; line-height: 1; }
+	  .vote-btn.voted {
+	    border-color: var(--accent);
+	    color: var(--accent);
+	    background: rgba(255,255,255,0.04);
+	  }
+	  .vote-btn:disabled {
+	    opacity: 0.32;
+	    cursor: default;
+	  }
+
+  .guest-tools {
+    display: flex; flex-direction: column; gap: 10px;
+    margin: 0 0 16px;
+  }
+  .tool-panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 10px;
+  }
+  .panel-head .section-label { padding: 0; }
+  .panel-status {
+    min-height: 15px; font-size: 11px; color: var(--muted);
+    text-align: right; white-space: nowrap;
+  }
+  .panel-status.error { color: #ff6b8a; }
+  .profile-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr) 132px;
+    gap: 9px; margin-bottom: 9px;
+  }
+  .field {
+    display: flex; flex-direction: column; gap: 5px;
+    min-width: 0; color: var(--muted); font-size: 11px; font-weight: 600;
+  }
+  .field input, .field textarea {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px;
+    background: #101016; color: var(--text); outline: none;
+    font: inherit; font-size: 14px; font-weight: 400;
+  }
+  .field input { height: 38px; padding: 0 10px; }
+  .field textarea {
+    height: 62px; padding: 9px 10px; resize: vertical;
+    margin-bottom: 10px; line-height: 1.35;
+  }
+  .field input:focus, .field textarea:focus { border-color: var(--accent); }
+  .consents { display: flex; flex-direction: column; gap: 8px; }
+  .consent {
+    display: flex; align-items: flex-start; gap: 9px;
+    color: var(--text); font-size: 12px; line-height: 1.35;
+  }
+  .consent input {
+    flex: 0 0 auto; width: 16px; height: 16px;
+    margin: 0; accent-color: var(--accent);
+  }
+  .consent span { min-width: 0; }
+  .voice-tools {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    margin: 0 0 12px;
+  }
+  .voice-btn {
+    border: 1px solid var(--line); border-radius: 8px;
+    background: #101016; color: var(--text); height: 36px;
+    padding: 0 12px; font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer;
+  }
+  .voice-btn.primary { border-color: var(--accent); }
+  .voice-btn:disabled { opacity: 0.42; cursor: default; }
+  .voice-state {
+    min-width: 0; flex: 1 1 135px;
+    color: var(--muted); font-size: 12px; line-height: 1.3;
+  }
+  .voice-state.listening { color: var(--accent); }
+  .voice-heard {
+    display: none; flex: 1 0 100%; min-height: 36px;
+    padding: 8px 10px; border-left: 2px solid var(--accent);
+    color: var(--text); font-size: 13px; line-height: 1.35;
+  }
+  .voice-heard.visible { display: block; }
+  .form-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+  .action-btn {
+    border: 1px solid var(--accent); border-radius: 8px;
+    background: transparent; color: var(--text); height: 36px;
+    min-width: 76px; padding: 0 13px; font: inherit;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .action-btn:disabled { opacity: 0.42; cursor: default; }
+  .palette-picker {
+    display: flex; gap: 8px; overflow-x: auto;
+    margin: 0 -3px 13px; padding: 0 3px 3px;
+    scrollbar-width: none; scroll-snap-type: x proximity;
+  }
+  .palette-picker::-webkit-scrollbar { display: none; }
+  .palette-btn {
+    position: relative; flex: 0 0 111px; height: 82px;
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 0; overflow: hidden; scroll-snap-align: start;
+    background: #090b10; color: #d7d7e0; font: inherit;
+    font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  .palette-btn::after {
+    content: ''; position: absolute; inset: 36px 0 0;
+    background: linear-gradient(transparent, rgba(5,6,11,0.76));
+    pointer-events: none;
+  }
+  .palette-btn.selected {
+    border-color: var(--accent); color: var(--text);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .palette-btn:disabled { opacity: 0.48; cursor: default; }
+  .palette-preview {
+    display: block; position: absolute; inset: 0;
+    width: 100%; height: 100%;
+  }
+  .palette-name {
+    position: absolute; left: 8px; bottom: 7px; z-index: 1;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+  }
+  .slider-row {
+    display: grid; grid-template-columns: 68px minmax(0, 1fr) 31px;
+    gap: 8px; align-items: center; height: 32px;
+    font-size: 12px; color: var(--muted);
+  }
+  .slider-row input[type=range] {
+    width: 100%; margin: 0; accent-color: var(--accent);
+  }
+  .slider-row output {
+    color: var(--text); font-size: 12px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .motion-row {
+    border-top: 1px solid var(--line); margin-top: 9px; padding-top: 10px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  .motion-toggle {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 13px; cursor: pointer;
+  }
+  .motion-toggle input {
+    appearance: none; width: 35px; height: 20px; border-radius: 10px;
+    border: 1px solid var(--line); background: #101016; position: relative;
+    margin: 0; transition: background 0.15s, border-color 0.15s;
+  }
+  .motion-toggle input::after {
+    content: ''; position: absolute; width: 14px; height: 14px;
+    left: 2px; top: 2px; border-radius: 50%; background: var(--muted);
+    transition: transform 0.15s, background 0.15s;
+  }
+  .motion-toggle input:checked {
+    border-color: var(--accent); background: rgba(255,255,255,0.07);
+  }
+  .motion-toggle input:checked::after {
+    transform: translateX(15px); background: var(--accent);
+  }
+  .motion-toggle input:disabled { opacity: 0.46; cursor: default; }
+  @media (prefers-reduced-motion: reduce) {
+    .palette-btn { transition: none; }
+  }
+  @media (max-width: 520px) {
+    .profile-grid { grid-template-columns: 1fr; }
+  }
 
   .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
     background: var(--accent); color: #1a1a22; padding: 10px 16px; border-radius: 100px;
@@ -101,6 +273,86 @@
 
 <div id="loaderr"></div>
 
+<section class="guest-tools" aria-label="Guest controls">
+  <form class="tool-panel" id="profile-form">
+    <div class="panel-head">
+      <div class="section-label">Your project</div>
+      <div class="panel-status" id="profile-status" role="status" aria-live="polite"></div>
+    </div>
+    <div class="voice-tools">
+      <button class="voice-btn primary" id="voice-intake-start" type="button" disabled>Speak details</button>
+      <button class="voice-btn" id="voice-intake-stop" type="button" hidden>Stop</button>
+      <div class="voice-state" id="voice-intake-status" role="status" aria-live="polite"></div>
+      <div class="voice-heard" id="voice-intake-heard" aria-live="polite"></div>
+    </div>
+    <div class="profile-grid">
+      <label class="field">Project title
+        <input id="project-title" name="projectTitle" type="text" maxlength="80" required disabled>
+      </label>
+      <label class="field">GitHub username
+        <input id="github-username" name="githubHandle" type="text" maxlength="39" autocomplete="username" autocapitalize="none" spellcheck="false" disabled>
+      </label>
+    </div>
+    <label class="field">Short description
+      <textarea id="project-description" name="projectDescription" maxlength="240" required disabled></textarea>
+    </label>
+    <div class="consents">
+      <label class="consent">
+        <input id="recording-consent" type="checkbox" disabled>
+        <span>I consent to live transcription and display of my spoken project updates.</span>
+      </label>
+      <label class="consent">
+        <input id="research-consent" type="checkbox" disabled>
+        <span>I consent to searching my public GitHub and project text for related public work.</span>
+      </label>
+    </div>
+    <div class="form-actions">
+      <button class="action-btn" id="profile-save" type="submit" disabled>Save</button>
+    </div>
+  </form>
+
+  <section class="tool-panel" aria-label="Visual controls">
+    <div class="panel-head">
+      <div class="section-label">Visuals</div>
+      <div class="panel-status" id="visual-status" role="status" aria-live="polite"></div>
+    </div>
+    <div class="palette-picker" aria-label="Visual palette">
+      <button class="palette-btn selected" type="button" data-palette="aurora" aria-pressed="true" disabled>
+        <canvas class="palette-preview" data-preview="aurora" aria-hidden="true"></canvas><span class="palette-name">Aurora</span>
+      </button>
+      <button class="palette-btn" type="button" data-palette="nebula" aria-pressed="false" disabled>
+        <canvas class="palette-preview" data-preview="nebula" aria-hidden="true"></canvas><span class="palette-name">Nebula</span>
+      </button>
+      <button class="palette-btn" type="button" data-palette="prism" aria-pressed="false" disabled>
+        <canvas class="palette-preview" data-preview="prism" aria-hidden="true"></canvas><span class="palette-name">Prism</span>
+      </button>
+      <button class="palette-btn" type="button" data-palette="embers" aria-pressed="false" disabled>
+        <canvas class="palette-preview" data-preview="embers" aria-hidden="true"></canvas><span class="palette-name">Embers</span>
+      </button>
+      <button class="palette-btn" type="button" data-palette="ocean" aria-pressed="false" disabled>
+        <canvas class="palette-preview" data-preview="ocean" aria-hidden="true"></canvas><span class="palette-name">Ocean</span>
+      </button>
+    </div>
+    <label class="slider-row" for="energy">
+      <span>Energy</span>
+      <input id="energy" type="range" min="0" max="100" value="50" disabled>
+      <output id="energy-value" for="energy">50</output>
+    </label>
+    <label class="slider-row" for="complexity">
+      <span>Complexity</span>
+      <input id="complexity" type="range" min="0" max="100" value="50" disabled>
+      <output id="complexity-value" for="complexity">50</output>
+    </label>
+    <div class="motion-row">
+      <label class="motion-toggle">
+        <input id="motion-toggle" type="checkbox" disabled>
+        <span>Shake visual pulse</span>
+      </label>
+      <div class="panel-status" id="gesture-status" role="status" aria-live="polite">Off</div>
+    </div>
+  </section>
+</section>
+
 <div class="search-wrap">
   <input type="search" id="q" placeholder="Search any song on YouTube…" autocomplete="off">
   <div class="status" id="status"></div>
@@ -121,27 +373,669 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const params = new URLSearchParams(location.search);
-const token = params.get('t');
-let me = null;
+	const TOKEN_KEY = 'dreamfinder.stage.token';
+	let token = localStorage.getItem(TOKEN_KEY);
+	let me = null;
+	let myVotes = new Set();
+	let myTracks = new Set();
+	let latestQueue = [];
+	let syncingVotes = false;
+  const profileForm = document.getElementById('profile-form');
+  const profileSave = document.getElementById('profile-save');
+  const voiceIntakeStart = document.getElementById('voice-intake-start');
+  const voiceIntakeStop = document.getElementById('voice-intake-stop');
+  const voiceIntakeStatus = document.getElementById('voice-intake-status');
+  const voiceIntakeHeard = document.getElementById('voice-intake-heard');
+  const RecognitionApi = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const paletteButtons = Array.from(document.querySelectorAll('.palette-btn'));
+  const palettePreviews = Array.from(document.querySelectorAll('.palette-preview'));
+  const visualPalettes = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
+  const energyEl = document.getElementById('energy');
+  const complexityEl = document.getElementById('complexity');
+  const motionToggle = document.getElementById('motion-toggle');
+  const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let selectedPalette = 'aurora';
+  let previewHue = 212;
+  let previewAnimationFrame = null;
+  let visualPostTimer = null;
+  let visualRequestId = 0;
+  let visualHoldUntil = 0;
+  let activeSlider = null;
+  let pendingVisuals = null;
+  let visualSyncTimer = null;
+  let motionEnabled = false;
+  let motionRequesting = false;
+  let lastAcceleration = null;
+  let lastShakeAt = 0;
+  let gestureStatusTimer = null;
+  let voiceRecognition = null;
+  let voiceSession = 0;
+  let voiceStep = 0;
+  let voiceRunning = false;
 
-async function bootstrap() {
-  if (!token) {
-    document.getElementById('loaderr').innerHTML = '<div class="err">No identity token. Ask the host to mint a QR for you.</div>';
-    return;
+const voiceSteps = [
+  {
+    prompt: 'What is the name of your project?',
+    status: 'Listening for project title',
+    apply(answer) {
+      document.getElementById('project-title').value = answer.slice(0, 80);
+    },
+  },
+  {
+    prompt: 'Briefly, what are you making or exploring?',
+    status: 'Listening for description',
+    apply(answer) {
+      document.getElementById('project-description').value = answer.slice(0, 240);
+    },
+  },
+  {
+    prompt: 'What is your GitHub username? Say skip if you do not want to add one.',
+    status: 'Listening for GitHub username',
+    apply(answer) {
+      const input = document.getElementById('github-username');
+      if (/\b(skip|none|no thanks|no thank you)\b/i.test(answer)) {
+        input.value = '';
+        return;
+      }
+      input.value = answer
+        .replace(/^my (?:github )?(?:username|handle) is\s+/i, '')
+        .replace(/\b(?:dash|hyphen)\b/gi, '-')
+        .replace(/^at\s+/i, '@')
+        .replace(/\s+/g, '')
+        .replace(/^@/, '')
+        .replace(/[^a-z0-9-]/gi, '')
+        .slice(0, 39);
+    },
+  },
+  {
+    prompt: 'Do you consent to live transcription and display of your spoken project updates? Say yes or no.',
+    status: 'Listening for transcript consent',
+    apply(answer) {
+      applySpokenConsent('recording-consent', answer);
+    },
+  },
+  {
+    prompt: 'Do you consent to searching your public GitHub and project text for related public work? Say yes or no.',
+    status: 'Listening for research consent',
+    apply(answer) {
+      applySpokenConsent('research-consent', answer);
+    },
+  },
+];
+
+function spokenConsent(answer) {
+  const words = answer.toLowerCase();
+  if (/\b(no|nope|decline|do not|don't|not consent)\b/.test(words)) return false;
+  if (/\b(yes|yeah|yep|consent|agree|i do|sure)\b/.test(words)) return true;
+  return null;
+}
+
+function applySpokenConsent(id, answer) {
+  const decision = spokenConsent(answer);
+  if (decision !== null) document.getElementById(id).checked = decision;
+}
+
+function setVoiceState(text, listening = false) {
+  voiceIntakeStatus.textContent = text;
+  voiceIntakeStatus.classList.toggle('listening', listening);
+}
+
+function showVoiceAnswer(answer) {
+  voiceIntakeHeard.textContent = answer;
+  voiceIntakeHeard.classList.add('visible');
+}
+
+function stopVoiceIntake(completed = false) {
+  voiceSession += 1;
+  voiceRunning = false;
+  if (voiceRecognition) {
+    voiceRecognition.abort();
+    voiceRecognition = null;
   }
-  try {
-    const r = await fetch(`/api/whoami?t=${encodeURIComponent(token)}`);
-    if (!r.ok) throw new Error('unknown token');
-    me = await r.json();
-    const el = document.getElementById('myname');
-    el.textContent = me.name;
-    el.style.color = me.color;
-    document.documentElement.style.setProperty('--accent', me.color);
-  } catch(e) {
-    document.getElementById('loaderr').innerHTML = '<div class="err">Identity not recognized. Ask the host for a fresh QR.</div>';
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  voiceIntakeStart.disabled = !me || !RecognitionApi;
+  voiceIntakeStop.hidden = true;
+  if (completed) {
+    setVoiceState('Review answers, then save');
+  } else {
+    setVoiceState('Voice intake stopped');
   }
 }
+
+function speakThen(text, session, callback) {
+  if (!('speechSynthesis' in window)) {
+    callback();
+    return;
+  }
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.98;
+  utterance.volume = 0.7;
+  utterance.onend = () => {
+    if (voiceRunning && session === voiceSession) callback();
+  };
+  utterance.onerror = () => {
+    if (voiceRunning && session === voiceSession) callback();
+  };
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+function collectVoiceStep(session) {
+  if (!voiceRunning || session !== voiceSession) return;
+  const step = voiceSteps[voiceStep];
+  setVoiceState(step.status, true);
+  let accepted = false;
+  const recognition = new RecognitionApi();
+  voiceRecognition = recognition;
+  recognition.lang = 'en-AU';
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+  recognition.onresult = (event) => {
+    let heard = '';
+    let isFinal = false;
+    for (let index = event.resultIndex; index < event.results.length; index++) {
+      heard += `${event.results[index][0].transcript} `;
+      isFinal = isFinal || event.results[index].isFinal;
+    }
+    heard = heard.trim();
+    if (heard) showVoiceAnswer(heard);
+    if (!heard || !isFinal || accepted) return;
+    accepted = true;
+    step.apply(heard);
+    recognition.stop();
+    voiceStep += 1;
+    if (voiceStep >= voiceSteps.length) {
+      stopVoiceIntake(true);
+      return;
+    }
+    setTimeout(() => promptVoiceStep(session), 180);
+  };
+  recognition.onerror = (event) => {
+    if (!voiceRunning || session !== voiceSession || accepted || event.error === 'aborted') return;
+    stopVoiceIntake(false);
+    setVoiceState(event.error === 'not-allowed' ? 'Microphone permission denied' : 'No answer heard', true);
+  };
+  recognition.onend = () => {
+    if (!voiceRunning || session !== voiceSession || accepted) return;
+    stopVoiceIntake(false);
+    setVoiceState('No answer heard', true);
+  };
+  try {
+    recognition.start();
+  } catch(e) {
+    stopVoiceIntake(false);
+    setVoiceState('Speech unavailable', true);
+  }
+}
+
+function promptVoiceStep(session) {
+  if (!voiceRunning || session !== voiceSession) return;
+  const step = voiceSteps[voiceStep];
+  setVoiceState(step.prompt);
+  speakThen(step.prompt, session, () => collectVoiceStep(session));
+}
+
+voiceIntakeStart.addEventListener('click', () => {
+  if (!RecognitionApi || !me) return;
+  voiceSession += 1;
+  voiceStep = 0;
+  voiceRunning = true;
+  voiceIntakeStart.disabled = true;
+  voiceIntakeStop.hidden = false;
+  voiceIntakeHeard.classList.remove('visible');
+  promptVoiceStep(voiceSession);
+});
+
+voiceIntakeStop.addEventListener('click', () => stopVoiceIntake(false));
+
+function hueColor(hue, saturation, lightness, alpha = 1) {
+  const value = ((hue % 360) + 360) % 360;
+  return `hsla(${value}, ${saturation}%, ${lightness}%, ${alpha})`;
+}
+
+function previewSurface(canvas) {
+  const width = Math.max(1, canvas.clientWidth);
+  const height = Math.max(1, canvas.clientHeight);
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const targetWidth = Math.round(width * ratio);
+  const targetHeight = Math.round(height * ratio);
+  if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return { ctx, width, height };
+}
+
+function previewGlow(ctx, x, y, radius, hue, alpha) {
+  const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
+  glow.addColorStop(0, hueColor(hue, 86, 60, alpha));
+  glow.addColorStop(0.48, hueColor(hue, 80, 44, alpha * 0.45));
+  glow.addColorStop(1, hueColor(hue, 80, 25, 0));
+  ctx.fillStyle = glow;
+  ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+}
+
+function paintPreview(canvas, seconds) {
+  const { ctx, width, height } = previewSurface(canvas);
+  const energy = Number(energyEl.value) / 100;
+  const complexity = Number(complexityEl.value) / 100;
+  const hue = previewHue;
+  const backdrop = ctx.createLinearGradient(0, 0, 0, height);
+  backdrop.addColorStop(0, hueColor(hue + 8, 40, 8));
+  backdrop.addColorStop(0.58, hueColor(hue - 16, 44, 5));
+  backdrop.addColorStop(1, 'rgb(4, 5, 10)');
+  ctx.fillStyle = backdrop;
+  ctx.fillRect(0, 0, width, height);
+  ctx.globalCompositeOperation = 'lighter';
+
+  if (canvas.dataset.preview === 'aurora') {
+    const bands = 2 + Math.round(complexity * 3);
+    for (let band = 0; band < bands; band++) {
+      ctx.beginPath();
+      const baseline = height * (0.2 + band * 0.15);
+      for (let x = -15; x <= width + 15; x += 8) {
+        const y = baseline + Math.sin(x * 0.07 + seconds * (0.25 + energy * 0.46) + band * 1.7)
+          * height * (0.055 + energy * 0.052);
+        if (x === -15) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.globalAlpha = 0.16 + energy * 0.1;
+      ctx.lineWidth = height * (0.14 - band * 0.018);
+      ctx.strokeStyle = hueColor(hue + band * 38, 85, 55);
+      ctx.stroke();
+    }
+  } else if (canvas.dataset.preview === 'nebula') {
+    const clouds = 3 + Math.round(complexity * 3);
+    for (let index = 0; index < clouds; index++) {
+      const phase = index * 1.83;
+      const x = width * (0.2 + (index % 3) * 0.3) + Math.sin(seconds * 0.2 + phase) * width * 0.09;
+      const y = height * (0.22 + ((index * 0.26) % 0.45)) + Math.cos(seconds * 0.18 + phase) * height * 0.1;
+      previewGlow(ctx, x, y, height * (0.3 + energy * 0.13), hue + index * 32, 0.18 + energy * 0.08);
+    }
+    ctx.globalAlpha = 0.66;
+    for (let index = 0; index < 10; index++) {
+      const x = (index * 47 % 107) / 107 * width;
+      const y = (index * 23 % 79) / 79 * height;
+      ctx.fillStyle = hueColor(hue + index * 9, 54, 88);
+      ctx.fillRect(x, y, 1.5, 1.5);
+    }
+  } else if (canvas.dataset.preview === 'prism') {
+    const rays = 4 + Math.round(complexity * 5);
+    for (let index = 0; index < rays; index++) {
+      const offset = ((index / rays) + seconds * (0.02 + energy * 0.034)) % 1;
+      const x = (offset * 1.5 - 0.28) * width;
+      ctx.beginPath();
+      ctx.moveTo(x, -4);
+      ctx.lineTo(x + width * 0.18, -4);
+      ctx.lineTo(x - width * 0.13, height + 4);
+      ctx.lineTo(x - width * 0.28, height + 4);
+      ctx.closePath();
+      ctx.fillStyle = hueColor(hue + index * (160 / rays), 86, 60, 0.12 + energy * 0.05);
+      ctx.fill();
+    }
+  } else if (canvas.dataset.preview === 'embers') {
+    const emberHue = hue * 0.25 + 14;
+    previewGlow(ctx, width * 0.5, height * 1.08, height * 0.86, emberHue, 0.3 + energy * 0.08);
+    const sparks = 8 + Math.round(complexity * 9);
+    for (let index = 0; index < sparks; index++) {
+      const rise = ((index / sparks) - seconds * (0.09 + energy * 0.1) + 2) % 1;
+      const x = ((index * 41) % 101) / 101 * width + Math.sin(seconds + index) * 4;
+      const y = rise * height;
+      ctx.globalAlpha = 0.28 + (1 - rise) * 0.6;
+      ctx.fillStyle = hueColor(emberHue + index * 2, 96, 66);
+      ctx.beginPath();
+      ctx.arc(x, y, 1.2 + energy * 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else {
+    previewGlow(ctx, width * 0.5, height * 0.08, height * 0.72, hue + 30, 0.2 + energy * 0.08);
+    const lines = 5 + Math.round(complexity * 6);
+    for (let line = 0; line < lines; line++) {
+      ctx.beginPath();
+      const baseline = height * (0.25 + line * 0.1);
+      for (let x = -8; x <= width + 8; x += 8) {
+        const y = baseline + Math.sin(x * 0.09 + seconds * (0.35 + energy * 0.33) + line * 0.62)
+          * (3 + energy * 5);
+        if (x === -8) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = hueColor(hue + line * 7, 78, 60, 0.14 + energy * 0.07);
+      ctx.lineWidth = 1.3 + (lines - line) * 0.17;
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function paintPreviews(now) {
+  const seconds = reducedMotionQuery.matches ? 0 : now / 1000;
+  palettePreviews.forEach(canvas => paintPreview(canvas, seconds));
+}
+
+function animatePreviews(now) {
+  paintPreviews(now);
+  previewAnimationFrame = requestAnimationFrame(animatePreviews);
+}
+
+function startPreviewAnimation() {
+  if (previewAnimationFrame !== null) cancelAnimationFrame(previewAnimationFrame);
+  if (reducedMotionQuery.matches) {
+    previewAnimationFrame = null;
+    paintPreviews(0);
+    return;
+  }
+  previewAnimationFrame = requestAnimationFrame(animatePreviews);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    cancelAnimationFrame(previewAnimationFrame);
+    previewAnimationFrame = null;
+  } else {
+    startPreviewAnimation();
+  }
+});
+
+if (typeof reducedMotionQuery.addEventListener === 'function') {
+  reducedMotionQuery.addEventListener('change', startPreviewAnimation);
+} else {
+  reducedMotionQuery.addListener(startPreviewAnimation);
+}
+
+async function bootstrap() {
+  document.getElementById('loaderr').innerHTML = '';
+  try {
+    if (token) {
+      const r = await fetch(`/api/whoami?t=${encodeURIComponent(token)}`);
+      if (r.ok) {
+        me = await r.json();
+      } else {
+        token = null;
+        localStorage.removeItem(TOKEN_KEY);
+      }
+    }
+    if (!token) {
+      const r = await fetch('/api/join', { method: 'POST' });
+      if (!r.ok) throw new Error('join failed');
+      const joined = await r.json();
+      token = joined.token;
+      localStorage.setItem(TOKEN_KEY, token);
+      me = { name: joined.name, color: joined.color };
+    }
+    renderIdentity();
+  } catch(e) {
+    document.getElementById('loaderr').innerHTML = '<div class="err">Could not join Stage. Check WiFi and try again.</div>';
+  }
+}
+
+function renderIdentity() {
+  const el = document.getElementById('myname');
+  el.textContent = me.name;
+  el.style.color = me.color;
+  document.documentElement.style.setProperty('--accent', me.color);
+  document.getElementById('project-title').value = me.projectTitle || '';
+  document.getElementById('project-description').value = me.projectDescription || '';
+  document.getElementById('github-username').value = me.githubHandle || '';
+  document.getElementById('recording-consent').checked = me.consentRecording === true;
+  document.getElementById('research-consent').checked = me.consentResearch === true;
+  profileForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = false; });
+  profileSave.disabled = false;
+  voiceIntakeStart.disabled = !RecognitionApi;
+  if (!RecognitionApi) setVoiceState('Speech not supported here');
+  paletteButtons.forEach(button => { button.disabled = false; });
+  energyEl.disabled = false;
+  complexityEl.disabled = false;
+  motionToggle.disabled = false;
+}
+
+function setPanelStatus(id, text, error = false) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.classList.toggle('error', error);
+}
+
+async function postGuestAction(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error('request failed');
+  return r.json().catch(() => ({}));
+}
+
+profileForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!token) return;
+  const body = {
+    token,
+    projectTitle: document.getElementById('project-title').value.trim(),
+    projectDescription: document.getElementById('project-description').value.trim(),
+    githubHandle: document.getElementById('github-username').value.trim(),
+    consentRecording: document.getElementById('recording-consent').checked,
+    consentResearch: document.getElementById('research-consent').checked,
+  };
+  profileSave.disabled = true;
+  setPanelStatus('profile-status', 'Saving');
+  try {
+    const data = await postGuestAction('/api/profile', body);
+    if (data.profile) {
+      me = { ...me, ...data.profile };
+      renderIdentity();
+      renderQueue(latestQueue);
+    }
+    setPanelStatus('profile-status', 'Saved');
+  } catch(e) {
+    setPanelStatus('profile-status', 'Save failed', true);
+  } finally {
+    profileSave.disabled = !token;
+  }
+});
+
+function selectPalette(palette) {
+  if (!visualPalettes.has(palette)) return;
+  selectedPalette = palette;
+  paletteButtons.forEach(button => {
+    const selected = button.dataset.palette === palette;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+}
+
+function updateSliderValue(slider) {
+  document.getElementById(`${slider.id}-value`).value = slider.value;
+  document.getElementById(`${slider.id}-value`).textContent = slider.value;
+}
+
+function markVisualInteraction() {
+  visualHoldUntil = Date.now() + 700;
+}
+
+function visualPayload() {
+  return {
+    token,
+    theme: selectedPalette,
+    energy: Number(energyEl.value) / 100,
+    complexity: Number(complexityEl.value) / 100,
+  };
+}
+
+async function postVisuals() {
+  if (!token) return;
+  const requestId = ++visualRequestId;
+  markVisualInteraction();
+  setPanelStatus('visual-status', 'Syncing');
+  try {
+    await postGuestAction('/api/visuals', visualPayload());
+    if (requestId === visualRequestId) setPanelStatus('visual-status', 'Live');
+  } catch(e) {
+    if (requestId === visualRequestId) setPanelStatus('visual-status', 'Sync failed', true);
+  }
+}
+
+function queueVisualPost(immediate = false) {
+  clearTimeout(visualPostTimer);
+  if (immediate) {
+    postVisuals();
+  } else {
+    visualPostTimer = setTimeout(postVisuals, 120);
+  }
+}
+
+paletteButtons.forEach(button => {
+  button.addEventListener('click', () => {
+    selectPalette(button.dataset.palette);
+    markVisualInteraction();
+    queueVisualPost(true);
+  });
+});
+
+[energyEl, complexityEl].forEach(slider => {
+  slider.addEventListener('pointerdown', () => {
+    activeSlider = slider;
+    markVisualInteraction();
+  });
+  slider.addEventListener('input', () => {
+    updateSliderValue(slider);
+    markVisualInteraction();
+    queueVisualPost();
+  });
+  slider.addEventListener('change', () => {
+    activeSlider = null;
+    markVisualInteraction();
+    queueVisualPost(true);
+  });
+});
+
+window.addEventListener('pointerup', () => { activeSlider = null; });
+window.addEventListener('pointercancel', () => { activeSlider = null; });
+
+function renderVisualControls(visuals) {
+  const theme = visuals.theme || visuals.palette || visuals.preset;
+  selectPalette(theme);
+  const hue = Number(visuals.hue);
+  if (Number.isFinite(hue)) previewHue = Math.max(0, Math.min(360, hue));
+  for (const [slider, value] of [[energyEl, visuals.energy], [complexityEl, visuals.complexity]]) {
+    const next = Number(value);
+    if (!Number.isFinite(next)) continue;
+    slider.value = String(Math.round(Math.max(0, Math.min(1, next)) * 100));
+    updateSliderValue(slider);
+  }
+  setPanelStatus('visual-status', 'Live');
+}
+
+function flushVisualSync() {
+  if (!pendingVisuals) return;
+  if (activeSlider || Date.now() < visualHoldUntil) {
+    const delay = activeSlider ? 120 : Math.max(1, visualHoldUntil - Date.now() + 1);
+    visualSyncTimer = setTimeout(flushVisualSync, delay);
+    return;
+  }
+  const visuals = pendingVisuals;
+  pendingVisuals = null;
+  renderVisualControls(visuals);
+}
+
+function syncVisualControls(visuals) {
+  if (!visuals || typeof visuals !== 'object') return;
+  if (activeSlider || Date.now() < visualHoldUntil) {
+    pendingVisuals = visuals;
+    clearTimeout(visualSyncTimer);
+    const delay = activeSlider ? 120 : Math.max(1, visualHoldUntil - Date.now() + 1);
+    visualSyncTimer = setTimeout(flushVisualSync, delay);
+    return;
+  }
+  clearTimeout(visualSyncTimer);
+  pendingVisuals = null;
+  renderVisualControls(visuals);
+}
+
+function stopMotion() {
+  if (motionEnabled) window.removeEventListener('devicemotion', handleMotion);
+  motionEnabled = false;
+  lastAcceleration = null;
+  clearTimeout(gestureStatusTimer);
+}
+
+function resetGestureStatusSoon() {
+  clearTimeout(gestureStatusTimer);
+  gestureStatusTimer = setTimeout(() => {
+    if (motionEnabled) setPanelStatus('gesture-status', 'On');
+  }, 900);
+}
+
+async function sendShake(intensity) {
+  if (!token) return;
+  setPanelStatus('gesture-status', 'Sending');
+  try {
+    await postGuestAction('/api/gesture', { token, type: 'shake', intensity });
+    if (motionEnabled) {
+      setPanelStatus('gesture-status', 'Sent');
+      resetGestureStatusSoon();
+    }
+  } catch(e) {
+    setPanelStatus('gesture-status', 'Send failed', true);
+  }
+}
+
+function handleMotion(event) {
+  const acceleration = event.acceleration || event.accelerationIncludingGravity;
+  if (!acceleration) return;
+  const current = [acceleration.x, acceleration.y, acceleration.z];
+  if (!current.every(value => typeof value === 'number' && Number.isFinite(value))) return;
+  if (!lastAcceleration) {
+    lastAcceleration = current;
+    return;
+  }
+  const change = Math.sqrt(current.reduce((total, value, index) => {
+    const delta = value - lastAcceleration[index];
+    return total + (delta * delta);
+  }, 0));
+  lastAcceleration = current;
+  const now = Date.now();
+  if (change < 14 || now - lastShakeAt < 900) return;
+  lastShakeAt = now;
+  const intensity = Math.min(1, Math.max(0.15, Math.round(((change - 8) / 28) * 100) / 100));
+  sendShake(intensity);
+}
+
+motionToggle.addEventListener('change', async () => {
+  if (!motionToggle.checked) {
+    stopMotion();
+    setPanelStatus('gesture-status', 'Off');
+    return;
+  }
+  if (!token || motionRequesting) return;
+  const MotionEvent = window.DeviceMotionEvent;
+  if (!MotionEvent) {
+    motionToggle.checked = false;
+    setPanelStatus('gesture-status', 'Unavailable', true);
+    return;
+  }
+  motionRequesting = true;
+  setPanelStatus('gesture-status', 'Requesting');
+  try {
+    if (typeof MotionEvent.requestPermission === 'function') {
+      const permission = await MotionEvent.requestPermission();
+      if (permission !== 'granted') throw new Error('permission denied');
+    }
+    if (!motionToggle.checked) {
+      setPanelStatus('gesture-status', 'Off');
+      return;
+    }
+    motionEnabled = true;
+    lastAcceleration = null;
+    window.addEventListener('devicemotion', handleMotion, { passive: true });
+    setPanelStatus('gesture-status', 'On');
+  } catch(e) {
+    motionToggle.checked = false;
+    stopMotion();
+    setPanelStatus('gesture-status', 'Permission denied', true);
+  } finally {
+    motionRequesting = false;
+  }
+});
 
 // Search (debounced)
 let searchTimer = null;
@@ -207,6 +1101,50 @@ async function queueTrack(it, el) {
   }
 }
 
+async function upvoteTrack(trackId, btn) {
+  if (!token) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/upvote', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, trackId }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'vote failed');
+    if (j.voted) {
+      myVotes.add(trackId);
+      showToast('Upvoted');
+    } else {
+      myVotes.delete(trackId);
+      showToast('Vote removed');
+    }
+    if (Array.isArray(j.queue)) latestQueue = j.queue;
+    renderQueue(latestQueue);
+  } catch(e) {
+    const msg = String(e.message || '');
+    showToast(msg.includes('own track') ? "That's yours" : 'Vote failed');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function syncVotes() {
+  if (!token || syncingVotes) return;
+  syncingVotes = true;
+  try {
+    const r = await fetch(`/api/votes?t=${encodeURIComponent(token)}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    myVotes = new Set(j.trackIds || []);
+    myTracks = new Set(j.ownedTrackIds || []);
+    renderQueue(latestQueue);
+  } catch(e) {
+  } finally {
+    syncingVotes = false;
+  }
+}
+
 let toastTimer;
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -219,13 +1157,16 @@ function showToast(msg) {
 // SSE for now-playing + queue
 function connectEvents() {
   const es = new EventSource('/api/events');
-  es.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(ev.data);
-      renderNow(data.nowPlaying);
-      renderQueue(data.queue || []);
-    } catch(e) {}
-  };
+	  es.onmessage = (ev) => {
+	    try {
+	      const data = JSON.parse(ev.data);
+	      renderNow(data.nowPlaying);
+	      latestQueue = data.queue || [];
+	      renderQueue(latestQueue);
+	      syncVotes();
+        syncVisualControls(data.visuals);
+	    } catch(e) {}
+	  };
   es.onerror = () => { /* EventSource auto-reconnects */ };
 }
 
@@ -246,28 +1187,45 @@ function renderNow(np) {
   who.style.color = np.color;
 }
 
-function renderQueue(q) {
-  const wrap = document.getElementById('queuewrap');
-  if (!q.length) { wrap.innerHTML = '<div class="empty">Queue is empty.</div>'; return; }
-  wrap.innerHTML = '<div class="queue"></div>';
-  const list = wrap.querySelector('.queue');
-  for (const it of q) {
-    const row = document.createElement('div');
-    row.className = 'qrow';
-    row.innerHTML = `
-      <img class="thumb" src="${it.thumbnail}" alt="">
-      <div class="qmeta">
-        <div class="qtitle"></div>
-        <div class="qby">by <span class="who"></span></div>
-      </div>`;
-    row.querySelector('.qtitle').textContent = it.title;
-    const who = row.querySelector('.who');
-    who.textContent = it.requesterName;
-    who.style.color = it.color;
-    list.appendChild(row);
-  }
-}
+	function renderQueue(q) {
+	  latestQueue = q || [];
+	  const wrap = document.getElementById('queuewrap');
+	  if (!latestQueue.length) { wrap.innerHTML = '<div class="empty">Queue is empty.</div>'; return; }
+	  wrap.innerHTML = '<div class="queue"></div>';
+	  const list = wrap.querySelector('.queue');
+	  for (const it of latestQueue) {
+	    const row = document.createElement('div');
+	    row.className = 'qrow';
+	    const votes = Number(it.votes || 0);
+	    const voted = myVotes.has(it.id);
+	    const mine = myTracks.has(it.id);
+	    row.innerHTML = `
+	      <img class="thumb" src="${it.thumbnail}" alt="">
+	      <div class="qmeta">
+	        <div class="qtitle"></div>
+	        <div class="qby">by <span class="who"></span></div>
+	      </div>
+	      <button class="vote-btn ${voted ? 'voted' : ''}" type="button" aria-pressed="${voted}" aria-label="${voted ? 'Remove upvote' : 'Upvote'}">
+	        <span class="arrow">▲</span>
+	        <span class="count">${votes}</span>
+	      </button>`;
+	    row.querySelector('.qtitle').textContent = it.title;
+	    const who = row.querySelector('.who');
+	    who.textContent = it.requesterName;
+	    who.style.color = it.color;
+	    const btn = row.querySelector('.vote-btn');
+	    btn.disabled = mine;
+	    if (mine) btn.title = 'Your track';
+	    btn.addEventListener('click', (ev) => {
+	      ev.preventDefault();
+	      ev.stopPropagation();
+	      upvoteTrack(it.id, btn);
+	    });
+	    list.appendChild(row);
+	  }
+	}
 
+startPreviewAnimation();
 bootstrap().then(connectEvents);
 </script>
 </body>
