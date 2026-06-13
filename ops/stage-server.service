@@ -1,0 +1,23 @@
+[Unit]
+Description=Stage Dreamfinder Node server
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nick/stage
+# Override in a systemd drop-in when Stage travels:
+# Environment=STAGE_JOIN_URL=https://imagineering.cc/stage
+# Optional private facilitation integrations:
+# Environment=STAGE_OPENAI_API_KEY=...
+# Environment=STAGE_OPENAI_MODEL=gpt-5.4-mini
+# Environment=STAGE_GITHUB_TOKEN=...
+ExecStart=/usr/bin/node /home/nick/stage/server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stage-server
+
+[Install]
+WantedBy=default.target

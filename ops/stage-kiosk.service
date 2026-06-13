@@ -1,0 +1,22 @@
+[Unit]
+Description=Stage room display Chromium kiosk
+Requires=stage-server.service
+After=stage-server.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nick/stage
+# launch-kiosk.sh targets Wayland display wayland-0; boot can precede the compositor.
+ExecStartPre=/bin/sh -c 'until [ -S /run/user/%U/wayland-0 ] && /usr/bin/curl -fs --max-time 2 -o /dev/null http://127.0.0.1:3000/room; do sleep 2; done'
+ExecStart=/home/nick/stage/launch-kiosk.sh
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stage-kiosk
+
+[Install]
+WantedBy=default.target
