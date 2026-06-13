@@ -103,6 +103,265 @@
     #mint-btn:active { transform: scale(0.98); }
     #mint-btn:disabled { opacity: 0.5; cursor: default; }
 
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1rem 1.25rem;
+      margin: 0 auto 1.5rem;
+      max-width: 640px;
+    }
+    .panel h2 {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+    }
+	    .join-row, .timer-controls, .mode-controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .join-url {
+      color: var(--muted);
+      font-size: 0.85rem;
+      word-break: break-all;
+      margin-top: 0.75rem;
+    }
+    .action-btn {
+      background: var(--accent);
+      color: #0d0d12;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 700;
+      padding: 0.55rem 0.9rem;
+    }
+    .action-btn:disabled, .ghost-btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .ghost-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 0.5rem 0.8rem;
+    }
+	    .ghost-btn:hover { border-color: var(--accent); color: var(--accent); }
+	    .mode-btn.active {
+	      border-color: var(--accent);
+	      color: var(--text);
+	      background: rgba(167,139,250,0.14);
+	    }
+    #timer-display {
+      font-size: 2.4rem;
+      line-height: 1;
+      font-weight: 800;
+      margin: 0.25rem 0 0.9rem;
+    }
+    #timer-state {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-bottom: 0.6rem;
+    }
+    #custom-minutes {
+      width: 5rem;
+      background: #0d0d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      padding: 0.5rem;
+    }
+    .spotlight-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 0.75rem;
+    }
+    .spotlight-field {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .spotlight-field > span {
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    #spotlight-attendee {
+      width: 100%;
+      min-height: 2.25rem;
+      background: #0d0d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 0.45rem 0.55rem;
+    }
+    .spotlight-kind-controls, .spotlight-controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .spotlight-kind-btn.active {
+      border-color: var(--accent);
+      color: var(--text);
+      background: rgba(167,139,250,0.14);
+    }
+    #spotlight-participant {
+      min-height: 1.25rem;
+      margin: 0.65rem 0 0.8rem;
+      color: var(--muted);
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+    .spotlight-project {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .spotlight-tag {
+      display: inline-block;
+      margin: 0.25rem 0.35rem 0 0;
+      padding: 0.12rem 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      font-size: 0.7rem;
+    }
+    .spotlight-tag.approved {
+      border-color: rgba(52,211,153,0.4);
+      color: #34d399;
+    }
+    #spotlight-status {
+      margin-top: 0.75rem;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    #spotlight-status.error { color: #f87171; }
+    #spotlight-transcript {
+      margin-top: 0.75rem;
+      background: #0d0d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.55rem 0.65rem;
+      color: var(--text);
+      font-size: 0.82rem;
+      line-height: 1.45;
+      max-height: 6rem;
+      overflow: auto;
+    }
+    #spotlight-insights {
+      margin-top: 0.75rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.7rem;
+    }
+    .insight-block + .insight-block { margin-top: 0.55rem; }
+    .insight-block h3 {
+      color: var(--muted);
+      font-size: 0.67rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.25rem;
+    }
+    .insight-block ul {
+      list-style-position: inside;
+      color: var(--text);
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+    .insight-note {
+      margin-bottom: 0.55rem;
+      color: #fbbf24;
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+    #spotlight-reports {
+      margin-top: 0.8rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.7rem;
+    }
+    .spotlight-subhead {
+      color: var(--muted);
+      font-size: 0.67rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.4rem;
+    }
+    #spotlight-reports-list {
+      display: flex;
+      flex-direction: column;
+    }
+    .reports-empty {
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .report-item {
+      border-top: 1px solid var(--border);
+      padding: 0.45rem 0;
+    }
+    .report-item:first-child { border-top: none; }
+    .report-item summary {
+      display: flex;
+      gap: 0.5rem;
+      align-items: baseline;
+      cursor: pointer;
+      list-style: none;
+      font-size: 0.8rem;
+    }
+    .report-item summary::-webkit-details-marker { display: none; }
+    .report-item summary::before {
+      content: '+';
+      color: var(--muted);
+      font-weight: 700;
+      width: 0.65rem;
+      flex-shrink: 0;
+    }
+    .report-item[open] summary::before { content: '-'; }
+    .report-name {
+      min-width: 0;
+      flex: 1;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .report-kind, .report-time {
+      flex-shrink: 0;
+      color: var(--muted);
+      font-size: 0.74rem;
+    }
+    .report-body {
+      margin: 0.45rem 0 0 1.15rem;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.4;
+    }
+    .report-transcript {
+      margin-bottom: 0.55rem;
+      color: var(--text);
+      max-height: 5rem;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    .report-insights .insight-block + .insight-block { margin-top: 0.4rem; }
+    @media (max-width: 520px) {
+      .spotlight-grid { grid-template-columns: 1fr; }
+      .report-item summary { flex-wrap: wrap; }
+      .report-time { margin-left: 1.15rem; }
+    }
+
     /* ── Now playing ── */
     #now-playing {
       background: var(--surface);
@@ -130,14 +389,29 @@
       background: var(--border);
     }
     .track-info { flex: 1; min-width: 0; }
-    .track-title {
-      font-size: 0.95rem;
-      font-weight: 600;
-      white-space: nowrap;
+	    .track-title {
+	      font-size: 0.95rem;
+	      font-weight: 600;
+	      white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-    }
-    .track-requester { font-size: 0.8rem; margin-top: 0.15rem; }
+	    }
+	    .track-requester { font-size: 0.8rem; margin-top: 0.15rem; }
+	    .track-votes {
+	      min-width: 3rem;
+	      flex-shrink: 0;
+	      border: 1px solid var(--border);
+	      border-radius: 8px;
+	      padding: 0.35rem 0.5rem;
+	      color: var(--muted);
+	      font-size: 0.8rem;
+	      font-weight: 800;
+	      text-align: center;
+	    }
+	    .track-votes.active {
+	      border-color: rgba(251,191,36,0.42);
+	      color: #fbbf24;
+	    }
 
     #skip-btn {
       flex-shrink: 0;
@@ -155,15 +429,21 @@
     #empty-playing { color: var(--muted); font-size: 0.9rem; }
 
     /* ── Queue ── */
-    #queue-section {
-      max-width: 640px;
-      margin: 0 auto 2rem;
-    }
-    #queue-section h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
-    #queue-list { display: flex; flex-direction: column; gap: 0.5rem; }
-    .queue-item {
-      background: var(--surface);
-      border: 1px solid var(--border);
+	    #queue-section {
+	      max-width: 640px;
+	      margin: 0 auto 2rem;
+	    }
+	    #queue-section h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
+	    #queue-list { display: flex; flex-direction: column; gap: 0.5rem; }
+	    #history-section {
+	      max-width: 640px;
+	      margin: 0 auto 2rem;
+	    }
+	    #history-section h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
+	    #history-list { display: flex; flex-direction: column; gap: 0.5rem; }
+	    .queue-item {
+	      background: var(--surface);
+	      border: 1px solid var(--border);
       border-radius: 10px;
       padding: 0.6rem 0.9rem;
     }
@@ -219,7 +499,71 @@
     <button id="qr-close" onclick="closeQR()">Done</button>
   </div>
 
-  <button id="mint-btn" onclick="mintAttendee()">✦ Mint new attendee</button>
+	  <section class="panel">
+	    <h2>Join</h2>
+    <div class="join-row">
+      <button class="action-btn" onclick="showJoinQR()">Show join QR</button>
+    </div>
+	    <div class="join-url" id="join-url"></div>
+	  </section>
+
+	  <section class="panel">
+	    <h2>Room mode</h2>
+	    <div class="mode-controls" id="mode-controls">
+	      <button class="ghost-btn mode-btn" data-mode="welcome" onclick="setMode('welcome')">Welcome</button>
+	      <button class="ghost-btn mode-btn" data-mode="free-jukebox" onclick="setMode('free-jukebox')">Jukebox</button>
+	      <button class="ghost-btn mode-btn" data-mode="sprint-build" onclick="setMode('sprint-build')">Build</button>
+	      <button class="ghost-btn mode-btn" data-mode="sprint-share" onclick="setMode('sprint-share')">Share</button>
+	      <button class="ghost-btn mode-btn" data-mode="sprint-break" onclick="setMode('sprint-break')">Break</button>
+	      <button class="ghost-btn mode-btn" data-mode="cool-down" onclick="setMode('cool-down')">Cool-down</button>
+	    </div>
+	  </section>
+
+	  <section class="panel">
+    <h2>Timer</h2>
+    <div id="timer-display">--:--</div>
+    <div id="timer-state">No timer running.</div>
+    <div class="timer-controls">
+      <button class="ghost-btn" onclick="startTimer(5)">5 min</button>
+      <button class="ghost-btn" onclick="startTimer(10)">10 min</button>
+      <button class="ghost-btn" onclick="startTimer(25)">25 min</button>
+      <input id="custom-minutes" type="number" min="1" max="240" value="25" aria-label="Timer minutes">
+      <button class="action-btn" onclick="startCustomTimer()">Start</button>
+      <button class="ghost-btn" onclick="clearTimer()">Clear</button>
+    </div>
+  </section>
+
+  <section class="panel" id="spotlight-section">
+    <h2>Spotlight</h2>
+    <div class="spotlight-grid">
+      <label class="spotlight-field">
+        <span>Participant</span>
+        <select id="spotlight-attendee" onchange="selectSpotlightAttendee(this.value)">
+          <option value="">No consented participants</option>
+        </select>
+      </label>
+      <div class="spotlight-field">
+        <span>Moment</span>
+        <div class="spotlight-kind-controls" role="group" aria-label="Spotlight moment">
+          <button class="ghost-btn spotlight-kind-btn active" data-kind="introduction" onclick="setSpotlightKind('introduction')">Intro</button>
+          <button class="ghost-btn spotlight-kind-btn" data-kind="progress" onclick="setSpotlightKind('progress')">Progress</button>
+        </div>
+      </div>
+    </div>
+    <div id="spotlight-participant">No participant selected.</div>
+    <div class="spotlight-controls">
+      <button class="action-btn" id="spotlight-start" onclick="startSpotlight()" disabled>Start listening</button>
+      <button class="ghost-btn" id="spotlight-analyze" onclick="stopAndAnalyzeSpotlight()" disabled>Stop &amp; analyze</button>
+      <button class="ghost-btn" id="spotlight-end" onclick="endSpotlight()" disabled>End</button>
+    </div>
+    <div id="spotlight-status" role="status">No active spotlight.</div>
+    <div id="spotlight-transcript" hidden></div>
+    <div id="spotlight-insights" hidden></div>
+    <div id="spotlight-reports">
+      <h3 class="spotlight-subhead">Recent reports</h3>
+      <div id="spotlight-reports-list"><span class="reports-empty">No reports yet.</span></div>
+    </div>
+  </section>
 
   <!-- Now playing -->
   <section id="now-playing">
@@ -230,53 +574,89 @@
   </section>
 
   <!-- Queue -->
-  <section id="queue-section">
-    <h2>Up next</h2>
-    <div id="queue-list"><span style="color:var(--muted);font-size:0.9rem;">Queue is empty.</span></div>
-  </section>
+	  <section id="queue-section">
+	    <h2>Up next</h2>
+	    <div id="queue-list"><span style="color:var(--muted);font-size:0.9rem;">Queue is empty.</span></div>
+	  </section>
 
-  <!-- Attendees -->
+	  <section id="history-section">
+	    <h2>Recently played</h2>
+	    <div id="history-list"><span style="color:var(--muted);font-size:0.9rem;">Nothing played yet.</span></div>
+	  </section>
+
+	  <!-- Attendees -->
   <section id="attendees-section">
     <h2>Attendees</h2>
     <div id="attendees-list"><span style="color:var(--muted);font-size:0.9rem;">No attendees yet.</span></div>
   </section>
 
   <script>
-    // API calls use same-origin (relative) so they work whether you open admin
-    // via Tailscale (<pi-tailscale-ip>), LAN (<pi-lan-ip>), or anything else.
-    // The LAN URL is only baked into the QR — that's what guest phones must reach.
-    const API = '';
-    const LAN_URL = `http://192.168.1.171:3000`;
+	    // API calls use same-origin (relative) so they work whether you open admin
+	    // via Tailscale, LAN, or anything else.
+	    const API = '';
+	    let joinUrl = 'https://imagineering.cc/stage';
 
     // ── State ──────────────────────────────────────────────
-    const attendees = []; // {token, name, color}
+	    const attendees = []; // {token, name, color, projectTitle, projectDescription, githubHandle, consentRecording, consentResearch}
+	    let timer = null;
+	    let timerTick = null;
+	    let roomMode = 'free-jukebox';
+      let spotlight = null;
+      let spotlightKind = 'introduction';
+      let selectedSpotlightToken = '';
+      let recognition = null;
+      let recognitionActive = false;
+      let recognitionStopping = false;
+      let recognitionStopResolve = null;
+      let recognitionStopTimeout = null;
+      let transcriptText = '';
+      let transcriptQueue = Promise.resolve();
+      let spotlightBusy = false;
+      let spotlightFeedback = '';
+      let spotlightFeedbackIsError = false;
+      let reports = [];
+      const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+	    document.getElementById('join-url').textContent = joinUrl;
 
     // ── SSE ────────────────────────────────────────────────
-    const es = new EventSource(`${API}/api/events`);
+    const es = new EventSource(`${API}/api/show-events`);
     es.onmessage = (e) => {
-      try { renderPlayback(JSON.parse(e.data)); } catch {}
+      try {
+	        const data = JSON.parse(e.data);
+          const state = data.state || data;
+	        renderPlayback(state);
+		        renderTimer(state.timer);
+		        renderMode(state.mode);
+	          if (Object.prototype.hasOwnProperty.call(state, 'spotlight')) {
+	            renderSpotlight(state.spotlight);
+	          }
+			        loadHistory();
+	      } catch {}
     };
 
     // ── Render playback ───────────────────────────────────
-    function trackHTML(track, showSkip = false) {
-      const img = track.thumbnail
-        ? `<img class="track-thumb" src="${track.thumbnail}" alt="" />`
-        : `<div class="track-thumb"></div>`;
-      const skip = showSkip
-        ? `<button id="skip-btn" onclick="skipTrack()">Skip ›</button>`
-        : '';
-      return `
-        <div class="track-row">
+	    function trackHTML(track, showSkip = false) {
+	      const img = track.thumbnail
+	        ? `<img class="track-thumb" src="${track.thumbnail}" alt="" />`
+	        : `<div class="track-thumb"></div>`;
+	      const votes = Number(track.votes || 0);
+	      const voteBadge = `<div class="track-votes ${votes ? 'active' : ''}" title="${votes} upvotes">▲ ${votes}</div>`;
+	      const skip = showSkip
+	        ? `<button id="skip-btn" onclick="skipTrack()">Skip ›</button>`
+	        : '';
+	      return `
+	        <div class="track-row">
           ${img}
           <div class="track-info">
-            <div class="track-title" title="${esc(track.title)}">${esc(track.title)}</div>
-            <div class="track-requester" style="color:${track.color}">${esc(track.requesterName)}</div>
-          </div>
-          ${skip}
-        </div>`;
-    }
+	            <div class="track-title" title="${esc(track.title)}">${esc(track.title)}</div>
+	            <div class="track-requester" style="color:${track.color}">${esc(track.requesterName)}</div>
+	          </div>
+	          ${voteBadge}
+	          ${skip}
+	        </div>`;
+	    }
 
-    function renderPlayback({ nowPlaying, queue }) {
+	    function renderPlayback({ nowPlaying, queue }) {
       const npEl = document.getElementById('now-playing-content');
       if (nowPlaying) {
         npEl.innerHTML = trackHTML(nowPlaying, true);
@@ -291,31 +671,68 @@
         ).join('');
       } else {
         qEl.innerHTML = `<span style="color:var(--muted);font-size:0.9rem;">Queue is empty.</span>`;
-      }
-    }
+	      }
+	    }
 
-    // ── Mint ───────────────────────────────────────────────
-    async function mintAttendee() {
-      const btn = document.getElementById('mint-btn');
-      btn.disabled = true;
-      try {
-        const res = await fetch(`${API}/api/mint`, { method: 'POST' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const { token, name, color } = await res.json();
-        attendees.push({ token, name, color });
-        renderAttendees();
-        showQR({ token, name, color });
-      } catch (err) {
-        alert(`Couldn't mint: ${err.message}`);
-      } finally {
-        btn.disabled = false;
-      }
-    }
+	    async function setMode(nextMode) {
+	      try {
+	        const res = await fetch(`${API}/api/mode`, {
+	          method: 'POST',
+	          headers: { 'Content-Type': 'application/json' },
+	          body: JSON.stringify({ mode: nextMode }),
+	        });
+	        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	        const data = await res.json();
+	        renderMode(data.mode);
+	      } catch (err) {
+	        alert(`Mode failed: ${err.message}`);
+	      }
+	    }
 
-    // ── QR ─────────────────────────────────────────────────
-    function showQR({ token, name, color }) {
-      const url = `${LAN_URL}/?t=${token}`;
-      document.getElementById('qr-name').textContent = name;
+	    function renderMode(nextMode) {
+	      roomMode = nextMode || 'free-jukebox';
+	      document.querySelectorAll('.mode-btn').forEach(button => {
+	        button.classList.toggle('active', button.dataset.mode === roomMode);
+	      });
+	    }
+
+		    async function loadHistory() {
+	      try {
+	        const res = await fetch(`${API}/api/history`);
+	        if (!res.ok) return;
+	        const data = await res.json();
+	        const tracks = (data.tracks || []).slice(0, 8);
+	        const el = document.getElementById('history-list');
+	        if (!tracks.length) {
+	          el.innerHTML = `<span style="color:var(--muted);font-size:0.9rem;">Nothing played yet.</span>`;
+	          return;
+		    }
+
+		        el.innerHTML = tracks.map(track =>
+	          `<div class="queue-item">${trackHTML(track)}</div>`
+	        ).join('');
+	      } catch {}
+	    }
+
+	    // ── QR ─────────────────────────────────────────────────
+	    function showJoinQR() {
+	      showQR({ title: 'Join Stage', color: 'var(--accent)', url: joinUrl });
+	    }
+
+	    async function loadConfig() {
+	      try {
+	        const res = await fetch(`${API}/api/config`);
+	        if (!res.ok) return;
+	        const data = await res.json();
+	        if (data.joinUrl) {
+	          joinUrl = data.joinUrl;
+	          document.getElementById('join-url').textContent = joinUrl;
+	        }
+	      } catch {}
+	    }
+
+    function showQR({ title, color, url }) {
+      document.getElementById('qr-name').textContent = title;
       document.getElementById('qr-name').style.color = color;
       document.getElementById('qr-url').textContent = url;
       // qrcode-generator API: build module matrix, draw to canvas manually.
@@ -357,9 +774,496 @@
       }
     }
 
+    // ── Timer ──────────────────────────────────────────────
+    async function startTimer(minutes) {
+      try {
+        const res = await fetch(`${API}/api/timer/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ minutes, label: 'Sprint' }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (err) {
+        alert(`Timer failed: ${err.message}`);
+      }
+    }
+
+    function startCustomTimer() {
+      const minutes = Number(document.getElementById('custom-minutes').value);
+      if (!Number.isFinite(minutes) || minutes <= 0) return;
+      startTimer(minutes);
+    }
+
+    async function clearTimer() {
+      try {
+        await fetch(`${API}/api/timer/clear`, { method: 'POST' });
+      } catch (err) {
+        alert(`Clear failed: ${err.message}`);
+      }
+    }
+
+    function renderTimer(nextTimer) {
+      timer = nextTimer || null;
+      if (!timerTick) timerTick = setInterval(updateTimerClock, 250);
+      updateTimerClock();
+    }
+
+    function updateTimerClock() {
+      const display = document.getElementById('timer-display');
+      const state = document.getElementById('timer-state');
+      if (!timer) {
+        display.textContent = '--:--';
+        state.textContent = 'No timer running.';
+        return;
+      }
+      if (timer.status === 'ended') {
+        display.textContent = '00:00';
+        state.textContent = `${timer.label || 'Timer'} ended.`;
+        return;
+      }
+      const left = Math.max(0, timer.endsAt - Date.now());
+      display.textContent = formatDuration(left);
+      state.textContent = `${timer.label || 'Timer'} running.`;
+    }
+
+    function formatDuration(ms) {
+      const total = Math.ceil(ms / 1000);
+      const m = Math.floor(total / 60);
+      const s = total % 60;
+      return `${m}:${String(s).padStart(2, '0')}`;
+    }
+
+    // ── Spotlight ──────────────────────────────────────────
+    function selectedSpotlightAttendee() {
+      return attendees.find(attendee => attendee.token === selectedSpotlightToken) || null;
+    }
+
+    function spotlightParticipantToken(state = spotlight) {
+      return state && (state.token || state.participantToken || state.attendeeToken || state.participant?.token) || '';
+    }
+
+    function spotlightIsActive() {
+      if (!spotlight || spotlight.active === false) return false;
+      return !['idle', 'ended'].includes(String(spotlight.status || '').toLowerCase());
+    }
+
+    function setSpotlightFeedback(message = '', isError = false) {
+      spotlightFeedback = message;
+      spotlightFeedbackIsError = isError;
+      renderSpotlightStatus();
+    }
+
+    function setSpotlightKind(kind) {
+      if (!['introduction', 'progress'].includes(kind) || spotlightIsActive()) return;
+      spotlightKind = kind;
+      updateSpotlightControls();
+    }
+
+    function selectSpotlightAttendee(token) {
+      selectedSpotlightToken = token;
+      setSpotlightFeedback('');
+      renderSelectedSpotlightParticipant();
+      updateSpotlightControls();
+    }
+
+    function renderSpotlightAttendees() {
+      const select = document.getElementById('spotlight-attendee');
+      const eligible = attendees.filter(attendee => attendee.consentRecording === true);
+      const activeToken = spotlightParticipantToken();
+      const previousToken = selectedSpotlightToken || activeToken;
+      select.innerHTML = `<option value="">${eligible.length ? 'Select participant' : 'No consented participants'}</option>` +
+        attendees.map(attendee => {
+          const title = attendee.projectTitle ? ` - ${attendee.projectTitle}` : '';
+          const unavailable = attendee.consentRecording === true ? '' : ' (no transcript consent)';
+          return `<option value="${esc(attendee.token)}" ${attendee.consentRecording === true ? '' : 'disabled'}>${esc(attendee.name + title + unavailable)}</option>`;
+        }).join('');
+
+      if (eligible.some(attendee => attendee.token === previousToken)) {
+        selectedSpotlightToken = previousToken;
+      } else {
+        selectedSpotlightToken = '';
+      }
+      select.value = selectedSpotlightToken;
+      renderSelectedSpotlightParticipant();
+      updateSpotlightControls();
+    }
+
+    function renderSelectedSpotlightParticipant() {
+      const el = document.getElementById('spotlight-participant');
+      const attendee = selectedSpotlightAttendee();
+      if (!attendee) {
+        el.textContent = 'No participant selected.';
+        return;
+      }
+      const handle = attendee.githubHandle
+        ? ` @${String(attendee.githubHandle).replace(/^@/, '')}`
+        : '';
+      const project = attendee.projectTitle
+        ? `<span class="spotlight-project">${esc(attendee.projectTitle)}</span>${esc(handle)}`
+        : esc(handle.trim() || attendee.name);
+      const description = attendee.projectDescription
+        ? `<div>${esc(attendee.projectDescription)}</div>`
+        : '';
+      const researchTag = attendee.consentResearch === true
+        ? `<span class="spotlight-tag approved">Research consent</span>`
+        : '';
+      el.innerHTML = `${project}${description}<span class="spotlight-tag approved">Transcript consent</span>${researchTag}`;
+    }
+
+    function renderSpotlight(nextSpotlight) {
+      spotlightFeedback = '';
+      spotlightFeedbackIsError = false;
+      spotlight = nextSpotlight || null;
+      const activeKind = spotlight && ['introduction', 'progress'].includes(spotlight.kind)
+        ? spotlight.kind
+        : null;
+      if (activeKind) spotlightKind = activeKind;
+      const stateTranscript = spotlight && spotlight.transcript;
+      if (typeof stateTranscript === 'string' && !recognitionActive) {
+        transcriptText = stateTranscript;
+        renderSpotlightTranscript(stateTranscript);
+      }
+      const stateInsights = extractInsights(spotlight);
+      if (stateInsights) renderSpotlightInsights(stateInsights);
+      if (!spotlight) {
+        renderSpotlightTranscript('');
+        renderSpotlightInsights(null);
+      }
+      renderSpotlightAttendees();
+      renderSpotlightStatus();
+      updateSpotlightControls();
+    }
+
+    function renderSpotlightStatus() {
+      const el = document.getElementById('spotlight-status');
+      el.classList.toggle('error', spotlightFeedbackIsError);
+      if (spotlightFeedback) {
+        el.textContent = spotlightFeedback;
+        return;
+      }
+      if (spotlightIsActive()) {
+        const attendee = attendees.find(item => item.token === spotlightParticipantToken());
+        const label = attendee ? attendee.name : 'Participant';
+        const phase = recognitionActive ? 'listening' : String(spotlight.status || 'active');
+        el.textContent = `${spotlightKind === 'progress' ? 'Progress' : 'Introduction'}: ${label} - ${phase}.`;
+        return;
+      }
+      el.textContent = SpeechRecognitionAPI
+        ? 'No active spotlight.'
+        : 'Speech recognition is unavailable in this browser.';
+    }
+
+    function updateSpotlightControls() {
+      const active = spotlightIsActive();
+      const consented = selectedSpotlightAttendee()?.consentRecording === true;
+      document.querySelectorAll('.spotlight-kind-btn').forEach(button => {
+        button.classList.toggle('active', button.dataset.kind === spotlightKind);
+        button.disabled = active || spotlightBusy;
+      });
+      document.getElementById('spotlight-attendee').disabled = active || spotlightBusy;
+      document.getElementById('spotlight-start').disabled =
+        !SpeechRecognitionAPI || !consented || active || spotlightBusy;
+      document.getElementById('spotlight-analyze').disabled = !active || spotlightBusy;
+      document.getElementById('spotlight-end').disabled = !active || spotlightBusy;
+    }
+
+    function renderSpotlightTranscript(transcript) {
+      const el = document.getElementById('spotlight-transcript');
+      el.hidden = !transcript;
+      el.textContent = transcript || '';
+    }
+
+    function insightItems(value) {
+      const items = Array.isArray(value) ? value : value ? [value] : [];
+      return items.map(item => {
+        if (typeof item === 'string') return item;
+        if (!item || typeof item !== 'object') return '';
+        const title = item.title || item.question || item.direction || item.connection || item.name || item.source || '';
+        return item.url && title ? `${title} - ${item.url}` : title || item.url || '';
+      }).filter(Boolean);
+    }
+
+    function extractInsights(data) {
+      if (!data) return null;
+      if (data.insights) return data.insights;
+      if (['questions', 'directions', 'connections', 'sources', 'authoredBy', 'note'].some(key => data[key])) return data;
+      return null;
+    }
+
+    function insightContentHTML(insights) {
+      if (!insights) return '';
+      const note = insights.note
+        ? String(insights.note)
+        : insights.authoredBy === 'evidence-template'
+          ? 'No model key is configured.'
+          : '';
+      const attribution = insights.authoredBy === 'evidence-template'
+        ? `<div class="insight-note">Evidence template: ${esc(note)}</div>`
+        : note
+          ? `<div class="insight-note">${esc(note)}</div>`
+          : '';
+      const sections = [
+        ['Questions', insightItems(insights.questions)],
+        ['Directions', insightItems(insights.directions)],
+        ['Connections', insightItems(insights.connections)],
+        ['Sources', insightItems(insights.sources)],
+      ].filter(([, items]) => items.length);
+      return attribution + sections.map(([heading, items]) => `
+        <div class="insight-block">
+          <h3>${heading}</h3>
+          <ul>${items.map(item => `<li>${esc(item)}</li>`).join('')}</ul>
+        </div>`).join('');
+    }
+
+    function renderSpotlightInsights(insights) {
+      const el = document.getElementById('spotlight-insights');
+      const content = insightContentHTML(insights);
+      el.hidden = !content;
+      el.innerHTML = content;
+    }
+
+    function formatReportTime(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime())
+        ? ''
+        : date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    async function loadReports() {
+      try {
+        const res = await fetch(`${API}/api/reports`);
+        if (!res.ok) return;
+        const data = await res.json();
+        reports = (data.reports || []).slice().sort((a, b) =>
+          new Date(b.endedAt || b.startedAt || 0) - new Date(a.endedAt || a.startedAt || 0)
+        ).slice(0, 8);
+        renderReports();
+      } catch {}
+    }
+
+    function renderReports() {
+      const el = document.getElementById('spotlight-reports-list');
+      if (!reports.length) {
+        el.innerHTML = `<span class="reports-empty">No reports yet.</span>`;
+        return;
+      }
+      el.innerHTML = reports.map(report => {
+        const kind = report.kind === 'progress' ? 'Progress' : 'Intro';
+        const project = report.projectTitle ? ` - ${report.projectTitle}` : '';
+        const transcript = report.transcript
+          ? `<div class="report-transcript">${esc(report.transcript)}</div>`
+          : `<div class="report-transcript">No transcript captured.</div>`;
+        const insights = insightContentHTML(report.insights);
+        return `
+          <details class="report-item">
+            <summary>
+              <span class="report-name">${esc((report.participantName || 'Participant') + project)}</span>
+              <span class="report-kind">${kind}</span>
+              <time class="report-time">${esc(formatReportTime(report.endedAt || report.startedAt))}</time>
+            </summary>
+            <div class="report-body">
+              ${transcript}
+              <div class="report-insights">${insights || '<span class="reports-empty">No insights saved.</span>'}</div>
+            </div>
+          </details>`;
+      }).join('');
+    }
+
+    async function postSpotlight(path, body) {
+      const res = await fetch(`${API}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    async function queueTranscriptUpdate(transcript, isFinal) {
+      transcriptQueue = transcriptQueue.catch(() => {}).then(() =>
+        postSpotlight('/api/spotlight/transcript', { transcript, isFinal })
+      ).catch(err => {
+        setSpotlightFeedback(`Transcript failed: ${err.message}`, true);
+      });
+      return transcriptQueue;
+    }
+
+    function beginSpotlightRecognition() {
+      if (!SpeechRecognitionAPI) return;
+      const nextRecognition = new SpeechRecognitionAPI();
+      recognition = nextRecognition;
+      recognitionStopping = false;
+      nextRecognition.continuous = true;
+      nextRecognition.interimResults = true;
+      nextRecognition.onstart = () => {
+        if (recognition !== nextRecognition) return;
+        recognitionActive = true;
+        if (recognitionStopping) {
+          nextRecognition.stop();
+          return;
+        }
+        setSpotlightFeedback('');
+        updateSpotlightControls();
+      };
+      nextRecognition.onresult = event => {
+        if (recognition !== nextRecognition) return;
+        let confirmed = '';
+        let interim = '';
+        for (let index = 0; index < event.results.length; index += 1) {
+          const spoken = event.results[index][0]?.transcript || '';
+          if (event.results[index].isFinal) confirmed += `${spoken} `;
+          else interim += `${spoken} `;
+        }
+        transcriptText = `${confirmed}${interim}`.trim();
+        renderSpotlightTranscript(transcriptText);
+        queueTranscriptUpdate(transcriptText, !interim.trim());
+      };
+      nextRecognition.onerror = event => {
+        if (recognition !== nextRecognition) return;
+        if (event.error !== 'aborted') {
+          setSpotlightFeedback(`Listening stopped: ${event.error}.`, true);
+        }
+      };
+      nextRecognition.onend = () => {
+        if (recognition !== nextRecognition) return;
+        recognition = null;
+        recognitionActive = false;
+        recognitionStopping = false;
+        clearTimeout(recognitionStopTimeout);
+        recognitionStopTimeout = null;
+        if (recognitionStopResolve) {
+          recognitionStopResolve();
+          recognitionStopResolve = null;
+        }
+        renderSpotlightStatus();
+        updateSpotlightControls();
+      };
+      try {
+        nextRecognition.start();
+      } catch (err) {
+        recognition = null;
+        setSpotlightFeedback(`Listening failed: ${err.message}`, true);
+      }
+    }
+
+    function stopSpotlightRecognition() {
+      if (!recognition) return Promise.resolve();
+      return new Promise(resolve => {
+        recognitionStopResolve = resolve;
+        recognitionStopping = true;
+        try {
+          recognition.stop();
+        } catch (err) {
+          try {
+            recognition.abort();
+          } catch {}
+        }
+        recognitionStopTimeout = setTimeout(() => {
+          if (recognition) recognition.abort();
+          recognition = null;
+          recognitionActive = false;
+          recognitionStopping = false;
+          recognitionStopResolve = null;
+          resolve();
+          renderSpotlightStatus();
+          updateSpotlightControls();
+        }, 1500);
+      });
+    }
+
+    async function startSpotlight() {
+      const attendee = selectedSpotlightAttendee();
+      if (!attendee || attendee.consentRecording !== true) {
+        setSpotlightFeedback('Select a participant with recording consent.', true);
+        return;
+      }
+      if (!SpeechRecognitionAPI) {
+        setSpotlightFeedback('Speech recognition is unavailable in this browser.', true);
+        return;
+      }
+      spotlightBusy = true;
+      transcriptText = '';
+      renderSpotlightTranscript('');
+      renderSpotlightInsights(null);
+      setSpotlightFeedback('');
+      updateSpotlightControls();
+      try {
+        const data = await postSpotlight('/api/spotlight/start', {
+          token: attendee.token,
+          kind: spotlightKind,
+        });
+        renderSpotlight(data.spotlight || {
+          active: true,
+          status: 'listening',
+          token: attendee.token,
+          kind: spotlightKind,
+        });
+        beginSpotlightRecognition();
+      } catch (err) {
+        setSpotlightFeedback(`Spotlight start failed: ${err.message}`, true);
+      } finally {
+        spotlightBusy = false;
+        updateSpotlightControls();
+      }
+    }
+
+    async function stopAndAnalyzeSpotlight() {
+      if (!spotlightIsActive()) return;
+      spotlightBusy = true;
+      setSpotlightFeedback('Analyzing...');
+      updateSpotlightControls();
+      try {
+        await stopSpotlightRecognition();
+        if (transcriptText) await queueTranscriptUpdate(transcriptText, true);
+        const data = await postSpotlight('/api/spotlight/insights', {});
+        const nextSpotlight = data.spotlight || data.state?.spotlight;
+        if (nextSpotlight) renderSpotlight(nextSpotlight);
+        renderSpotlightInsights(extractInsights(data) || extractInsights(nextSpotlight));
+        setSpotlightFeedback('Analysis ready.');
+        loadReports();
+      } catch (err) {
+        setSpotlightFeedback(`Analysis failed: ${err.message}`, true);
+      } finally {
+        spotlightBusy = false;
+        updateSpotlightControls();
+      }
+    }
+
+    async function endSpotlight() {
+      spotlightBusy = true;
+      updateSpotlightControls();
+      try {
+        await stopSpotlightRecognition();
+        if (transcriptText) await queueTranscriptUpdate(transcriptText, true);
+        await postSpotlight('/api/spotlight/end', {});
+        transcriptText = '';
+        renderSpotlight(null);
+        setSpotlightFeedback('Spotlight ended.');
+        loadReports();
+      } catch (err) {
+        setSpotlightFeedback(`Spotlight end failed: ${err.message}`, true);
+      } finally {
+        spotlightBusy = false;
+        updateSpotlightControls();
+      }
+    }
+
     // ── Attendees ──────────────────────────────────────────
+    async function loadAttendees() {
+      try {
+        const res = await fetch(`${API}/api/attendees`);
+        if (!res.ok) return;
+        const data = await res.json();
+        attendees.splice(0, attendees.length, ...(data.attendees || []));
+        renderAttendees();
+      } catch {}
+    }
+
     function renderAttendees() {
       const el = document.getElementById('attendees-list');
+      renderSpotlightAttendees();
       if (!attendees.length) {
         el.innerHTML = `<span style="color:var(--muted);font-size:0.9rem;">No attendees yet.</span>`;
         return;
@@ -368,7 +1272,6 @@
         <div class="attendee-row">
           <div class="color-swatch" style="background:${a.color}"></div>
           <div class="attendee-name" style="color:${a.color}">${esc(a.name)}</div>
-          <button class="show-qr-btn" onclick="showQR(attendees[${i}])">QR</button>
         </div>`).join('');
     }
 
@@ -380,6 +1283,16 @@
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
     }
+
+		    loadConfig();
+			    loadAttendees();
+		    loadHistory();
+        loadReports();
+      renderSpotlightStatus();
+      updateSpotlightControls();
+	    setInterval(loadAttendees, 5000);
+		    setInterval(loadHistory, 5000);
+        setInterval(loadReports, 5000);
   </script>
 </body>
 </html>
