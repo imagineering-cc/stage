@@ -5,11 +5,6 @@ on:
   push:
     branches: [main]
 
-# Never let two deploys race on the appliance.
-concurrency:
-  group: pi-deploy
-  cancel-in-progress: false
-
 jobs:
   # Validation runs on GitHub-hosted runners (NOT the Pi) so that pull requests
   # — including any future fork PRs — never execute on the self-hosted runner.
@@ -22,25 +17,32 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install mpv
+        # The server spawns mpv at startup to drive audio. Newer code can skip it
+        # via STAGE_NO_AUDIO, but installing it keeps the smoke test green against
+        # any revision (and mirrors the Pi more closely).
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mpv
+
       - name: Syntax-check the server
         run: node --check server.js
 
       - name: Boot smoke test
-        # The server has zero npm deps. STAGE_NO_AUDIO skips mpv; a temp state
-        # file keeps the repo clean. We assert the HTTP server actually answers.
+        # Assert the HTTP server actually answers. STAGE_NO_AUDIO skips mpv on
+        # code that supports it; a temp state file keeps the repo clean. The
+        # server listens on 3000 by default on every revision.
         run: |
           set -euo pipefail
           STATE=$(mktemp)
-          STAGE_NO_AUDIO=1 PORT=4123 STAGE_STATE_FILE="$STATE" node server.js &
+          STAGE_NO_AUDIO=1 STAGE_STATE_FILE="$STATE" node server.js &
           PID=$!
           ok=
           for _ in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:4123/ >/dev/null 2>&1; then ok=1; break; fi
+            if curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1; then ok=1; break; fi
             sleep 0.5
           done
           kill "$PID" 2>/dev/null || true
           rm -f "$STATE"
-          if [ -z "$ok" ]; then echo "server did not answer on :4123"; exit 1; fi
+          if [ -z "$ok" ]; then echo "server did not answer on :3000"; exit 1; fi
           echo "boot smoke test OK"
 
   # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
@@ -50,6 +52,11 @@ jobs:
     needs: validate
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, pi]
+    # Never let two deploys race on the appliance (scoped to this job so it
+    # doesn't serialize unrelated PR validations).
+    concurrency:
+      group: pi-deploy
+      cancel-in-progress: false
     steps:
       - name: Sync main to ~/stage and restart services
         # No actions/checkout: we deploy into ~/stage on the Pi, not the runner
