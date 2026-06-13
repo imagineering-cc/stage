@@ -1,0 +1,93 @@
+name: CI & Deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Never let two deploys race on the appliance.
+concurrency:
+  group: pi-deploy
+  cancel-in-progress: false
+
+jobs:
+  # Validation runs on GitHub-hosted runners (NOT the Pi) so that pull requests
+  # — including any future fork PRs — never execute on the self-hosted runner.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax-check the server
+        run: node --check server.js
+
+      - name: Boot smoke test
+        # The server has zero npm deps. STAGE_NO_AUDIO skips mpv; a temp state
+        # file keeps the repo clean. We assert the HTTP server actually answers.
+        run: |
+          set -euo pipefail
+          STATE=$(mktemp)
+          STAGE_NO_AUDIO=1 PORT=4123 STAGE_STATE_FILE="$STATE" node server.js &
+          PID=$!
+          ok=
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:4123/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 0.5
+          done
+          kill "$PID" 2>/dev/null || true
+          rm -f "$STATE"
+          if [ -z "$ok" ]; then echo "server did not answer on :4123"; exit 1; fi
+          echo "boot smoke test OK"
+
+  # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
+  # validation passed — so untrusted PR code never reaches the Pi, and broken
+  # code never gets deployed.
+  deploy:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, pi]
+    steps:
+      - name: Sync main to ~/stage and restart services
+        # No actions/checkout: we deploy into ~/stage on the Pi, not the runner
+        # workspace. The server has zero npm deps, so there's nothing to build.
+        run: |
+          set -euo pipefail
+          # The runner is a user systemd service, so the user manager is reachable.
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          STAGE="$HOME/stage"
+          REPO="https://github.com/imagineering-cc/stage.git"
+
+          if [ ! -d "$STAGE/.git" ]; then
+            echo "First deploy — bootstrapping $STAGE as a clean checkout"
+            tmp="$(mktemp -d)"
+            git clone --depth 1 "$REPO" "$tmp/repo"
+            # Preserve runtime state + local secrets across the swap (both gitignored)
+            [ -f "$STAGE/stage-state.json" ] && cp -a "$STAGE/stage-state.json" "$tmp/repo/" || true
+            if [ -f "$STAGE/ops/network.local.md" ]; then
+              mkdir -p "$tmp/repo/ops"
+              cp -a "$STAGE/ops/network.local.md" "$tmp/repo/ops/"
+            fi
+            rm -rf "$STAGE"
+            mv "$tmp/repo" "$STAGE"
+            rm -rf "$tmp"
+          else
+            git -C "$STAGE" fetch --depth 1 origin main
+            git -C "$STAGE" reset --hard origin/main
+          fi
+
+          echo "Deployed $(git -C "$STAGE" rev-parse --short HEAD)"
+
+          # Restart the server (mandatory) and refresh the TV kiosk (best-effort).
+          systemctl --user restart stage-server.service
+          systemctl --user restart stage-kiosk.service || echo "kiosk restart skipped"
+
+          sleep 2
+          if systemctl --user is-active --quiet stage-server.service; then
+            echo "stage-server active after deploy ✓"
+          else
+            echo "stage-server is NOT active after deploy"; exit 1
+          fi
