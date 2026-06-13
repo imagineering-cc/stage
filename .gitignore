@@ -1,3 +1,9 @@
 node_modules/
 *.log
 .DS_Store
+stage-state.json
+stage-state.json.*.tmp
+
+# Local-only venue secrets (WiFi creds, Pi Tailscale IP, exact LAN addresses)
+*.local.md
+ops/network.local.md
