@@ -68,23 +68,20 @@ jobs:
           STAGE="$HOME/stage"
           REPO="https://github.com/imagineering-cc/stage.git"
 
+          # Initialize ~/stage as a git checkout IN PLACE on first run. This is
+          # deliberately non-destructive: `git reset --hard` only overwrites
+          # tracked paths, so untracked runtime files (stage-state.json,
+          # ops/network.local.md) are preserved. An earlier version rm -rf'd the
+          # directory and lost the untracked launch-kiosk.sh — never again.
           if [ ! -d "$STAGE/.git" ]; then
-            echo "First deploy — bootstrapping $STAGE as a clean checkout"
-            tmp="$(mktemp -d)"
-            git clone --depth 1 "$REPO" "$tmp/repo"
-            # Preserve runtime state + local secrets across the swap (both gitignored)
-            [ -f "$STAGE/stage-state.json" ] && cp -a "$STAGE/stage-state.json" "$tmp/repo/" || true
-            if [ -f "$STAGE/ops/network.local.md" ]; then
-              mkdir -p "$tmp/repo/ops"
-              cp -a "$STAGE/ops/network.local.md" "$tmp/repo/ops/"
-            fi
-            rm -rf "$STAGE"
-            mv "$tmp/repo" "$STAGE"
-            rm -rf "$tmp"
-          else
-            git -C "$STAGE" fetch --depth 1 origin main
-            git -C "$STAGE" reset --hard origin/main
+            echo "First deploy — initializing $STAGE as a git checkout in place"
+            mkdir -p "$STAGE"
+            git -C "$STAGE" init -q
+            git -C "$STAGE" remote add origin "$REPO" 2>/dev/null \
+              || git -C "$STAGE" remote set-url origin "$REPO"
           fi
+          git -C "$STAGE" fetch --depth 1 origin main
+          git -C "$STAGE" reset --hard origin/main
 
           echo "Deployed $(git -C "$STAGE" rev-parse --short HEAD)"
 
