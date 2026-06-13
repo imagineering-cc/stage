@@ -20,7 +20,7 @@ egregores (see `../.claude/CLAUDE.md`). Stage is where the egregore
 *becomes physical* — where the shared vision takes on light and sound and
 shows the room what the room is doing.
 
-## Status (last touched 2026-05-02 evening / 2026-05-03 wee hours)
+## Status (last touched 2026-05-27)
 
 **Shipped its first show live during an Imagineering build-and-share meetup,
 2026-05-02 (sprint 4 of 4).** Strangers scanned QRs and queued tracks; music
@@ -30,18 +30,23 @@ on the API as a final test. It was a hell of a session.
 
 **What works today:**
 
-- ✅ Phone scans QR → gets Dreamfinder identity (Adjective Animal name + deterministic hue)
+- ✅ Phone scans one stable QR / opens `imagineering.cc/stage` → gets a private browser token; an entered GitHub handle becomes its visible identity
 - ✅ Search YouTube via yt-dlp (instant, no API key)
-- ✅ Tap result → queued (FIFO)
-- ✅ mpv plays through TV via HDMI (audio-device pinned to `vc4hdmi1`)
-- ✅ Admin app mints QRs, shows queue, skips current track
-- ✅ Room page on TV shows now-playing huge with requester nickname in their color, queue ribbon at bottom
+- ✅ Tap result → queued; attendees can upvote, while equal-vote tracks rotate fairly between requesters
+- ✅ mpv plays through TV via HDMI (audio-device pinned to `vc4hdmi0`)
+- ✅ Admin app shows join QR, room phase controls, timer, history, queue, attendees, and skip
+- ✅ Guests can complete a speech-guided project profile intake, opt into spotlight transcription/research, choose from animated visual previews, and fire a shake gesture burst
+- ✅ Room page shows a generative Canvas background, QR, now-playing, phase label, split-flap clock, progress bar, and timer alarm
+- ✅ Host spotlight captures consented spoken intros/progress reports; live words drift across the TV and archived reports persist
+- ✅ Consented spotlight analysis searches opted-in public GitHub repositories plus arXiv/OpenAlex literature and presents questions/directions in a perspective crawl
 - ✅ Live updates everywhere via Server-Sent Events (zero npm dependencies on the server)
-- ✅ Pi auto-reachable from anywhere via Tailscale
+- ✅ Identity/project profiles, reports, visuals, history, waiting queue/votes, room phase, and timer state survive Node restarts
+- ✅ Systemd user services start the Stage server and TV kiosk at boot
+- ✅ Pi reachable from the public Caddy host over Tailscale
+- ✅ Linksys WRT1900ACS has OpenWrt installed for the guest-network/router role
+- ✅ `https://imagineering.cc/stage` publicly proxies to the guest app on the Pi
 
-**Known half-done / next-session work:** see [Pending](#pending) below. The
-big one is OpenWrt on the Linksys — flash was mid-flight when the session
-ended.
+**Current delivery roadmap:** see [PLAN.md](PLAN.md).
 
 ## The story (so future-you can recall it)
 
@@ -85,19 +90,20 @@ calibration). The collaboration was sharper for the friction.
 
 ```
                 ┌──────────────────────┐
-                │  Server-Sent Events  │  ← single source of truth
-                │  /api/events         │     {nowPlaying, queue}
+                │  Server-Sent Events  │  ← public guest state
+                │  /api/events         │     playback + visuals only
+                │  /api/show-events    │  ← private display/admin transcript stream
                 └─────────┬────────────┘
                           │
         ┌─────────────────┼─────────────────┐
         │                 │                 │
    ┌────▼─────┐      ┌────▼─────┐      ┌────▼──────┐
    │ Guest    │      │  Admin   │      │   Room    │
-   │ PWA (/)  │      │ (/admin) │      │ (TV,      │
+   │ PWA      │      │ (/admin) │      │ (TV,      │
    │          │      │          │      │  Chromium │
-   │ scan QR  │      │ mint QRs │      │  kiosk    │
-   │ search   │      │ skip     │      │  /static/ │
-   │ queue    │      │ see all  │      │   room    │
+   │ /stage   │      │ join QR  │      │  kiosk    │
+   │ auto ID  │      │ timer    │      │  /room    │
+	   │ visuals  │      │ spotlight│      │ transcript│
    └──────────┘      └──────────┘      └───────────┘
         │                 │                 ▲
         └────POST /api ───┘                 │
@@ -106,8 +112,9 @@ calibration). The collaboration was sharper for the friction.
             │      Node server (server.js)        │
             │   single file, zero npm deps        │
             │   ┌─────────────────────────────┐   │
-            │   │  identityStore (in-memory)  │   │
-            │   │  queueManager (FIFO)         │   │
+	            │   │  persistent room state      │   │
+	            │   │  vote + fair queue ranking  │   │
+	            │   │  consent + research runner  │   │
             │   │  ytSearch (yt-dlp child)     │   │
             │   │  mpvController (JSON IPC)    │   │
             │   │  sseHub (broadcast)          │   │
@@ -125,7 +132,7 @@ calibration). The collaboration was sharper for the friction.
                             │
                   ┌─────────▼─────────┐
                   │ TV speakers       │
-                  │ (vc4hdmi1, ALSA)  │
+                  │ (vc4hdmi0, ALSA)  │
                   └───────────────────┘
 ```
 
@@ -139,10 +146,17 @@ Three architectural choices worth defending:
 - **Three surfaces, one bus** — adding sprint mode means changing the
   `{mode, nowPlaying, queue}` shape and rendering it three different ways. No
   service-to-service plumbing.
+- **Private speech stream** — `/api/events` is publicly proxied for guests, but
+  transcripts, reports, research output, and host controls are available only
+  on local/Tailscale `/api/show-events` and host routes.
 
 ## Network setup
 
-The Pi (`raspberrypi`, Tailscale `<pi-tailscale-ip>`) is dual-homed:
+> **Venue specifics (Pi Tailscale IP, WiFi SSIDs/passwords, exact LAN/DHCP
+> addresses) live in `ops/network.local.md`, which is gitignored.** This public
+> doc keeps only the reusable architecture and recipe.
+
+The Pi (`raspberrypi`) is dual-homed:
 
 - **`wlan0`**: connects to the venue WiFi (or your home WiFi). Provides
   internet for yt-dlp + Tailscale. Default route lives here.
@@ -166,23 +180,67 @@ without this flag yt-dlp will silently fail with "Failed to resolve
 www.youtube.com." Tailscale's MagicDNS (`100.100.100.100`) ends up as
 the resolver, which is great.
 
-**Guest phones** join the Linksys WiFi. The QR codes encode `http://192.168.1.171:3000/?t=<token>` — the Pi's eth0 IP. This **must be updated** when
-the Pi gets a different ethernet IP (different DHCP lease, different
-Linksys config). It's hardcoded in `public/admin.html` as `LAN_URL`.
+**Guest phones** use the stable public join URL
+`https://imagineering.cc/stage`. The intended public Caddy route proxies the
+guest page and guest APIs to the Pi over Tailscale so attendees do not need to
+join the Linksys WiFi. The OpenWrt LAN remains useful as a local fallback:
+`dreamfinder.lan` resolves to the Pi's guest-LAN IP.
 
-**Admin and dev access** is via Tailscale: `ssh nick@<pi-tailscale-ip>`. Admin
-page works at `http://<pi-tailscale-ip>:3000/admin` from Mac on any network.
+The Linksys WRT1900ACS has since been flashed to OpenWrt for the router/AP
+role. Guest and upstream WiFi credentials are in `ops/network.local.md`.
+
+Current state: the OpenWrt guest AP is running and has upstream internet
+through the room WiFi via OpenWrt `wwan`. Observed guest-network DHCP behavior,
+the guest subnet, and the Pi's static lease are recorded in
+`ops/network.local.md`. In summary: guests join the OpenWrt AP, get a
+`192.168.1.0/24` address, and reach the Pi at `dreamfinder.lan`.
+
+Verified from the Pi over Tailscale on 2026-05-23 (concrete addresses in
+`ops/network.local.md`):
+
+- The Pi is reachable on its Tailscale IP, its room-WiFi IP, and its guest-LAN
+  IP (`/24` on `eth0`)
+- OpenWrt LAN is `192.168.1.1/24`; DHCP start `100`, limit `150`, lease `12h`
+- OpenWrt `wwan` is uplinked via the room WiFi
+- Stage server responds locally on the Pi at `http://127.0.0.1:3000/`
+- Live Caddy route:
+  `/stage`, `/api/join`, `/api/whoami`, `/api/profile`, `/api/search`,
+  `/api/queue`, `/api/upvote`, `/api/votes`, `/api/visuals`,
+  `/api/gesture`, and `/api/events` → the Pi over Tailscale;
+  admin/timer/announce endpoints stay off the public route
+- Verified from the public internet on 2026-05-25:
+  `GET /stage`, `/api/join`, `/api/whoami`, `/api/events`, and `/api/search`
+  work; `/admin`, `/api/mint`, `/api/skip`, `/api/timer/start`, and
+  `/api/announce` return `404`
+- Public `/api/mode` and `/api/history` also return `404`; host-only controls
+  remain available through Tailscale/LAN access
+- Public `/api/profile`, `/api/visuals`, and `/api/gesture` now proxy to the
+  Pi (invalid-token probes return `401`); private `/api/show-events`,
+  `/api/reports`, and `/api/spotlight/*` return `404` publicly
+- Generative room and mobile-control pages were rendered from the deployed
+  build with Playwright at TV and phone viewports; both produced nonblank
+  captures, and the Pi can reach OpenAlex scholarly search
+- Split-flap timer/progress data path verified with a temporary timer over SSE,
+  then cleared; kiosk runs with Chromium autoplay allowed for alarm audio
+- `stage-server.service` and `stage-kiosk.service` are enabled and active as
+  systemd user services; lingering is enabled for boot startup
+
+**Admin and dev access** is via Tailscale (`ssh nick@<pi-tailscale-ip>`; the
+admin page works at `http://<pi-tailscale-ip>:3000/admin` from any machine on
+the tailnet). The concrete address is in `ops/network.local.md`.
 
 ## Files
 
 ```
 stage/
-├── server.js          # Single-file Node server (~250 lines)
+├── server.js          # Single-file Node server and persisted room state
 ├── public/
-│   ├── index.html     # Guest PWA — scan QR → search → queue
-│   ├── admin.html     # Host tool — mint QRs, see queue, skip
-│   ├── room.html      # TV display — fullscreen, requester-color glow
+│   ├── index.html     # Guest PWA — project consent, visuals/shake, queue/vote
+│   ├── admin.html     # Host tool — QR, mode, timer, spotlight, reports, queue
+│   ├── room.html      # TV — Canvas visuals, transcript/crawl, clock, playback
 │   └── qrcode.min.js  # Vendored qrcode-generator (20KB, no CDN dep)
+├── ops/               # Systemd user units and Pi installer
+├── PLAN.md            # Product milestones and immediate implementation slice
 └── CLAUDE.md          # This file
 ```
 
@@ -190,41 +248,81 @@ stage/
 
 | Method | Path                | Purpose                                       |
 |--------|---------------------|-----------------------------------------------|
-| GET    | `/`                 | Guest PWA (reads `?t=<token>` from URL)       |
+| GET    | `/`                 | Guest PWA                                     |
+| GET    | `/stage`            | Canonical guest PWA join path                 |
 | GET    | `/admin`            | Host admin app                                |
+| GET    | `/room`             | Room/TV display                               |
 | GET    | `/static/<file>`    | Serve from `public/`                          |
-| GET    | `/api/whoami?t=…`   | `{name, color}` for a token                   |
-| POST   | `/api/mint`         | Returns `{token, name, color}` for new attendee |
+| GET    | `/api/config`       | Host-only configured join URL                 |
+| GET    | `/api/whoami?t=…`   | Guest identity and the guest's project profile |
+| POST   | `/api/join`         | Guest self-join; returns `{token, name, color}` |
+| POST   | `/api/profile`      | Guest project details and recording/research consent |
+| POST   | `/api/visuals`      | Guest updates generative theme/energy/complexity |
+| POST   | `/api/gesture`      | Guest phone shake sends a transient visual burst |
+| POST   | `/api/mint`         | Legacy/manual identity mint                   |
 | GET    | `/api/search?q=…`   | yt-dlp top-5 YouTube results                  |
 | POST   | `/api/queue`        | Body `{token, videoId, title, thumbnail}` → adds to queue |
+| GET    | `/api/votes?t=…`    | Current token's upvoted and owned queued track IDs |
+| POST   | `/api/upvote`       | Body `{token, trackId}` → toggles one upvote  |
 | POST   | `/api/skip`         | Stop current track, advance queue             |
-| GET    | `/api/events`       | SSE stream of `{nowPlaying, queue}`           |
+| GET    | `/api/history`      | Host-only recent played tracks                |
+| GET    | `/api/reports`      | Host-only archived spotlight reports/results  |
+| POST   | `/api/mode`         | Host-only room phase selection                |
+| POST   | `/api/spotlight/start` | Host begins a consented intro/progress turn |
+| POST   | `/api/spotlight/transcript` | Host streams browser speech recognition text |
+| POST   | `/api/spotlight/insights` | Host runs consented GitHub/arXiv/OpenAlex analysis |
+| POST   | `/api/spotlight/end` | Host archives and clears the spotlight        |
+| POST   | `/api/timer/start`  | Body `{minutes}` or `{seconds}` → starts timer |
+| POST   | `/api/timer/clear`  | Clears active/ended timer                     |
+| GET    | `/api/events`       | Public SSE playback/visual state; no transcript |
+| GET    | `/api/show-events`  | Private room/admin SSE including spotlight text/results |
 
-State is **in-memory**. A server restart loses identities, queue,
-and now-playing. Persistence is a future task (SQLite would suffice).
+Persistent state is stored atomically in `stage-state.json` on the Pi. It
+retains identities and consented profiles, archived reports/results, visuals,
+recent play history, waiting queue/votes, timer, and room phase across service
+restarts. A live interim transcript is intentionally not persisted until the
+host ends the spotlight. The actively playing track is not resumed after a
+restart; the next retained queued track starts instead.
+
+Guest identity has two layers: a private random token authorizes actions, while
+the visible participant label changes to `@github-handle` after a participant
+supplies a syntactically valid handle, falling back to the generated
+Dreamfinder name. The handle is participant-asserted, not proof of GitHub
+account ownership.
+
+The join QR destination defaults to `https://imagineering.cc/stage` and can
+be overridden for another venue using the `STAGE_JOIN_URL` environment
+variable on `stage-server.service`.
+
+Evidence search runs without secrets against public GitHub repositories
+provided by consenting participants plus arXiv and OpenAlex. Optional
+Dreamfinder-authored questions/directions use the OpenAI Responses API only
+when `STAGE_OPENAI_API_KEY` is installed in a private systemd drop-in; configure
+`STAGE_OPENAI_MODEL` and `STAGE_GITHUB_TOKEN` there as needed. Without a model
+key, the room labels the analysis as source-backed facilitation rather than
+claiming generated commentary.
 
 ## Running it on the Pi
 
-The deployed copy lives at `~/dreamfinder/` on the Pi (named `dreamfinder`
-historically; that directory is the running instance — leave it for now or
-rename to `stage` next session).
+The deployed copy lives at `~/stage/` on the Pi.
 
 ```bash
-ssh nick@<pi-tailscale-ip>
-cd ~/dreamfinder
-nohup node server.js > server.log 2>&1 &
+ssh nick@<pi-tailscale-ip>   # address in ops/network.local.md
+cd ~/stage
+./ops/install-user-services.sh
 ```
 
-Check it's listening: `ss -tlnp | grep :3000` should show node on `0.0.0.0:3000`.
-
-The Chromium kiosk for the TV is launched separately:
+The installer owns `stage-server.service` and `stage-kiosk.service` in the
+user systemd manager. Check them with:
 
 ```bash
-~/dreamfinder/launch-kiosk.sh   # writes chromium.log
+systemctl --user status stage-server.service stage-kiosk.service
+journalctl --user -u stage-server.service -u stage-kiosk.service -f
 ```
 
-Currently launched ad-hoc via `nohup setsid bash launch-kiosk.sh ...`. Should
-become a systemd user service so it survives reboots — that's a future task.
+The kiosk launcher includes `--autoplay-policy=no-user-gesture-required` so
+timer alarm audio can play without a click. The kiosk unit waits for both the
+Wayland socket and `/room` before opening Chromium.
 
 The Pi has `mpv`, `node` (v20), `npm`, and `yt-dlp` (via pip
 `--break-system-packages`). All installed via apt + pip during the meetup
@@ -232,46 +330,9 @@ session.
 
 ## Pending
 
-In rough priority order:
-
-1. **OpenWrt flash on the WRT1900ACS** (mid-flight when session ended). The
-   factory image is at `~/Downloads/openwrt/openwrt-25.12.2-wrt1900acs-factory.img`
-   on Nick's Mac (SHA256 verified against the official sums). The plan is in
-   the conversation transcript: flash via stock UI → SSH from Pi to OpenWrt
-   at `192.168.1.1` (since Mac has no ethernet) → configure routed-client
-   WISP mode + AP for guests + dnsmasq for `dreamfinder.local`. The dual
-   firmware partition makes failed flashes auto-recover after 3 power cycles
-   — fearless to attempt.
-2. **Add `/room` route to server.js** — currently the kiosk loads
-   `/static/room.html`. Trivial fix; just adds an alias. Server restart
-   interrupts mpv though, so do it during a downtime.
-3. **Move project on Pi from `~/dreamfinder/` to `~/stage/`** to match the
-   org-side rename. Update launcher script paths.
-4. **systemd user service** for the server + the Chromium kiosk so they
-   survive reboots and Nick doesn't have to ssh in every time.
-5. **Persistence** — SQLite store for identities (so attendees can keep their
-   handle across meetups) and play history (so we know what was played and
-   can build a "play it again" feature).
-6. **Sprint mode** (the *real* Stage feature, ref: captured task #1
-   "Design jukebox-as-meetup-instrument: sprint mode + Dreamfinder framing"):
-   - state machine: `free-jukebox` → `sprint-build` → `sprint-share` → `sprint-break`
-   - admin controls to start/configure sprints
-   - room visualizer reflects phase + time-remaining
-   - musical wind-down at sprint end (volume curve + closing chord)
-   - maybe themed playlist behavior per phase (focus during build, etc.)
-7. **Audio FFT loopback + WebGL shader visualizer** on the room page. The
-   "breathing" CSS keyframe pulse on the now-playing card is a placeholder
-   meant to be wired to bass amplitude. Need to set up a PipeWire null-sink,
-   tap PCM, FFT server-side, broadcast bins via WS or SSE.
-8. **Round-robin + upvote queue** to replace FIFO (currently `if (!nowPlaying)
-   playNext()` and `queue.push`). The design is in captured task #1: round-robin
-   between requesters as the floor, upvotes promote across slots (Nick chose
-   "popular tracks can jump the queue").
-9. **Move CDN-loaded fonts/icons to vendored or system-stack only** if anything
-   creeps in. Tonight already vendored qrcode lib — venue WiFi blocks
-   jsdelivr in some cases, so vendor everything.
-10. **Mode-aware QR generation** — the `LAN_URL` in admin.html is hardcoded.
-    Should be derived dynamically from the request, OR settable via admin UI.
+The current plan is captured in [PLAN.md](PLAN.md). The next implementation
+slice is host-controlled event sessions and public interaction gating, after a
+real-phone smoke test of the deployed guest flow.
 
 ## The vision (north star)
 
@@ -289,8 +350,7 @@ the order they should ship:
   The room remembers. Maybe people accumulate small visual badges based on
   what they've queued historically.
 - **Audio-reactive shader visualizer** — the "breathing" pulse becomes real
-  FFT-driven motion, raymarched fragment shaders, the visual signature of
-  the room.
+  FFT-driven motion layered into the interactive Canvas show.
 
 The *Dreamfinder* family naming convention should be preserved — every show
 the system runs has a name evocative of the room's life. Tonight's
