@@ -260,6 +260,37 @@
   .toast.show { opacity: 1; }
 
   .err { color: #ff6b8a; padding: 18px; text-align: center; }
+
+  /* Event title — subtle line under the brand, shown only while open */
+  .event-title { font-size: 12px; color: var(--accent); letter-spacing: 0.04em; margin-top: 10px; }
+  .event-title:empty { display: none; }
+
+  /* Closed-state: a calm full-screen resting card.
+     Driven by the `room-closed` class on <body>. */
+  body.room-closed > section.guest-tools,
+  body.room-closed > .search-wrap,
+  body.room-closed > .results,
+  body.room-closed > section.now { display: none; }
+  body.room-closed .event-title { display: none; }
+
+  #closed-screen { display: none; }
+  body.room-closed #closed-screen {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; gap: 14px;
+    min-height: 56vh; padding: 32px 20px;
+  }
+  #closed-screen .resting-card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 20px; padding: 32px 26px; max-width: 360px;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+  }
+  #closed-screen .resting-mark { font-size: 32px; line-height: 1; margin-bottom: 14px; }
+  #closed-screen .resting-title {
+    font-size: 22px; font-weight: 700; line-height: 1.2; color: var(--text);
+  }
+  #closed-screen .resting-body {
+    font-size: 14px; line-height: 1.5; color: var(--muted); margin-top: 12px;
+  }
 </style>
 </head>
 <body>
@@ -269,9 +300,18 @@
     <span class="you">You are</span>
     <span class="name" id="myname">…</span>
   </div>
+  <div class="event-title" id="event-title" role="status" aria-live="polite"></div>
 </header>
 
 <div id="loaderr"></div>
+
+<section id="closed-screen" aria-live="polite">
+  <div class="resting-card">
+    <div class="resting-mark" aria-hidden="true">✦</div>
+    <div class="resting-title">The room is resting</div>
+    <div class="resting-body">No event is running right now — check back when the host opens the stage.</div>
+  </div>
+</section>
 
 <section class="guest-tools" aria-label="Guest controls">
   <form class="tool-panel" id="profile-form">
@@ -412,6 +452,40 @@
   let voiceSession = 0;
   let voiceStep = 0;
   let voiceRunning = false;
+  let roomOpen = true;
+
+// A room is OPEN only when an event object exists and its status is "open".
+// Anything else (null event, or status "closed") is the resting/closed state.
+// `applyEventState` is reactive: SSE updates flip the page live, no reload.
+function applyEventState(event) {
+  const open = !!(event && event.status === 'open');
+  const wasOpen = roomOpen;
+  roomOpen = open;
+  document.body.classList.toggle('room-closed', !open);
+  const titleEl = document.getElementById('event-title');
+  titleEl.textContent = open && event.title ? event.title : '';
+  // Re-opened while we never managed to join (guest landed during a closed
+  // room, so bootstrap bailed without a token): join now so the controls light
+  // up without a reload.
+  if (open && !wasOpen && !token) bootstrap();
+  // Closing mid-session: stop any in-flight voice intake and motion sensing
+  // so a resting room isn't quietly listening or broadcasting shakes.
+  if (!open) {
+    if (voiceRunning) stopVoiceIntake(false);
+    if (motionEnabled) {
+      stopMotion();
+      if (motionToggle) motionToggle.checked = false;
+      setPanelStatus('gesture-status', 'Off');
+    }
+  }
+}
+
+// Belt-and-braces: any guest fetch that comes back 403 with eventClosed:true
+// means the host shut the room between SSE frames — flip to closed now rather
+// than waiting for the next event payload.
+function noteEventClosed(data) {
+  if (data && data.eventClosed) applyEventState(null);
+}
 
 const voiceSteps = [
   {
@@ -757,7 +831,16 @@ async function bootstrap() {
     }
     if (!token) {
       const r = await fetch('/api/join', { method: 'POST' });
-      if (!r.ok) throw new Error('join failed');
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        if (data.eventClosed) {
+          // Room is resting — no event open. Show the calm closed card and let
+          // the SSE stream flip us open (and join) once the host opens the stage.
+          applyEventState(null);
+          return;
+        }
+        throw new Error('join failed');
+      }
       const joined = await r.json();
       token = joined.token;
       localStorage.setItem(TOKEN_KEY, token);
@@ -801,7 +884,11 @@ async function postGuestAction(path, body) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error('request failed');
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    noteEventClosed(data);
+    throw new Error(data.error || 'request failed');
+  }
   return r.json().catch(() => ({}));
 }
 
@@ -1093,7 +1180,11 @@ async function queueTrack(it, el) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ token, videoId: it.videoId, title: it.title, thumbnail: it.thumbnail }),
     });
-    if (!r.ok) throw new Error('queue failed');
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      noteEventClosed(data);
+      throw new Error('queue failed');
+    }
     showToast('Queued');
   } catch(e) {
     showToast('Failed');
@@ -1111,7 +1202,10 @@ async function upvoteTrack(trackId, btn) {
       body: JSON.stringify({ token, trackId }),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || 'vote failed');
+    if (!r.ok) {
+      noteEventClosed(j);
+      throw new Error(j.error || 'vote failed');
+    }
     if (j.voted) {
       myVotes.add(trackId);
       showToast('Upvoted');
@@ -1160,6 +1254,7 @@ function connectEvents() {
 	  es.onmessage = (ev) => {
 	    try {
 	      const data = JSON.parse(ev.data);
+	      applyEventState(data.event);
 	      renderNow(data.nowPlaying);
 	      latestQueue = data.queue || [];
 	      renderQueue(latestQueue);

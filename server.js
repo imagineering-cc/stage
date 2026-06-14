@@ -74,6 +74,38 @@ const sseClients = new Set(); // { res, includeSpotlight } stream clients
 let timer = savedState.timer && typeof savedState.timer === 'object' ? savedState.timer : null;
 let timerTimeout = null;
 let mode = SHOW_MODES.has(savedState.mode) ? savedState.mode : 'free-jukebox';
+
+// --- event session lifecycle ---
+// One host-controlled event gates all guest participation. With no open event,
+// guests see a friendly closed room and cannot mutate any state. The event
+// carries only identity/title/status/dates — the live phase stays in `mode`
+// (its single source of truth) and is surfaced as `phase` in the payload.
+function normalizeEvent(value) {
+  if (!value || typeof value !== 'object' || typeof value.id !== 'string') return null;
+  return {
+    id: value.id,
+    title: cleanText(value.title, 100) || 'Imagineering Meetup',
+    status: value.status === 'open' ? 'open' : 'closed',
+    openedAt: Number(value.openedAt) || null,
+    closedAt: Number(value.closedAt) || null,
+  };
+}
+let event = normalizeEvent(savedState.event);
+const eventsArchive = Array.isArray(savedState.eventsArchive)
+  ? savedState.eventsArchive.map(normalizeEvent).filter(Boolean)
+  : [];
+// Migration: a deployment that predates the event model but has live
+// participants keeps running uninterrupted — wrap its state in an open event
+// rather than locking the room the instant this code ships. Fresh installs
+// (no identities, no queue) start closed: the host opens the first event.
+if (!event && (identities.size > 0 || queue.length > 0)) {
+  const migratedId = crypto.randomBytes(6).toString('hex');
+  event = { id: migratedId, title: 'Imagineering Meetup', status: 'open', openedAt: Date.now(), closedAt: null };
+  for (const identity of identities.values()) if (!identity.eventId) identity.eventId = migratedId;
+  for (const track of queue) if (!track.eventId) track.eventId = migratedId;
+  for (const entry of playHistory) if (!entry.eventId) entry.eventId = migratedId;
+  for (const report of reports) if (!report.eventId) report.eventId = migratedId;
+}
 let announcement = null;      // { id, title, message, detail, createdAt, expiresAt, color } | null
 let announcementTimeout = null;
 let visuals = normalizeVisuals(savedState.visuals);
@@ -123,6 +155,8 @@ function savePersistentState() {
     mode,
     visuals,
     reports,
+    event,
+    eventsArchive,
   }, null, 2);
   try {
     fs.writeFileSync(tmp, data, { mode: 0o600 });
@@ -137,7 +171,7 @@ function createIdentity() {
   const token = crypto.randomBytes(16).toString('hex');
   const name = generateName();
   const color = colorForName(name);
-  identities.set(token, { name, color, mintedAt: Date.now() });
+  identities.set(token, { name, color, mintedAt: Date.now(), eventId: currentEventId() });
   savePersistentState();
   return { token, name, color };
 }
@@ -246,13 +280,14 @@ function sortQueue() {
 }
 
 function recordPlay(track) {
-  playHistory.unshift({ ...publicTrack(track), playedAt: Date.now() });
+  playHistory.unshift({ ...publicTrack(track), eventId: track.eventId || currentEventId(), playedAt: Date.now() });
   playHistory.length = Math.min(playHistory.length, HISTORY_LIMIT);
   savePersistentState();
 }
 
 function statePayload({ includeSpotlight = false } = {}) {
   const payload = {
+    event: publicEvent(),
     nowPlaying: publicTrack(nowPlaying),
     queue: publicQueue(),
     timer: currentTimer(),
@@ -347,6 +382,86 @@ function clearAnnouncement() {
   announcementTimeout = null;
   announcement = null;
   broadcast();
+}
+
+// --- event lifecycle helpers ---
+// The id of the event new participation should be tagged with, or null when no
+// event is open (which is also the signal that guest routes must be rejected).
+function currentEventId() {
+  return event && event.status === 'open' ? event.id : null;
+}
+
+// What every surface sees about the event. Phase is read from `mode` (its
+// single source of truth), never stored twice.
+function publicEvent() {
+  if (!event) return null;
+  return {
+    id: event.id,
+    title: event.title,
+    status: event.status,
+    phase: mode,
+    openedAt: event.openedAt,
+    closedAt: event.closedAt,
+  };
+}
+
+// Guard for guest-mutating routes: 403 with a client-detectable flag when the
+// room is closed. Returns true to proceed, false after having already replied.
+function requireOpenEvent(res) {
+  if (event && event.status === 'open') return true;
+  send(res, 403, { error: 'No event is running right now.', eventClosed: true });
+  return false;
+}
+
+function stopPlayback() {
+  nowPlaying = null;
+  if (AUDIO_ENABLED) mpvSend(['stop']).catch(() => {});
+}
+
+function archiveCurrentEvent() {
+  if (!event) return;
+  const closed = { ...event, status: 'closed', closedAt: event.closedAt || Date.now() };
+  const existing = eventsArchive.findIndex(e => e.id === closed.id);
+  if (existing >= 0) eventsArchive[existing] = closed;
+  else eventsArchive.unshift(closed);
+  eventsArchive.length = Math.min(eventsArchive.length, 100);
+}
+
+// Open a fresh meetup. Clears the pending show (queue/playback/timer/announce/
+// spotlight) for a clean slate but keeps eventId-tagged history and reports so
+// past events stay reviewable. Callers ensure no event is currently open.
+function openEvent(title) {
+  stopPlayback();
+  queue.splice(0, queue.length);
+  if (spotlight) { archiveSpotlight(); spotlight = null; }
+  clearTimer();
+  clearAnnouncement();
+  mode = 'welcome';
+  event = {
+    id: crypto.randomBytes(6).toString('hex'),
+    title: cleanText(title, 100) || 'Imagineering Meetup',
+    status: 'open',
+    openedAt: Date.now(),
+    closedAt: null,
+  };
+  savePersistentState();
+  broadcast();
+  return publicEvent();
+}
+
+// Close the open event: stop the show and archive the event so its output stays
+// reviewable. Guests immediately see the friendly closed state.
+function closeEvent() {
+  if (!event) return null;
+  stopPlayback();
+  if (spotlight) { archiveSpotlight(); spotlight = null; }
+  clearTimer();
+  clearAnnouncement();
+  event = { ...event, status: 'closed', closedAt: Date.now() };
+  archiveCurrentEvent();
+  savePersistentState();
+  broadcast();
+  return publicEvent();
 }
 
 // --- mpv control ---
@@ -763,6 +878,7 @@ function archiveSpotlight() {
   if (!spotlight || !spotlight.transcript) return;
   reports.unshift({
     id: spotlight.id,
+    eventId: currentEventId(),
     participantName: spotlight.participantName,
     projectTitle: spotlight.projectTitle,
     kind: spotlight.kind,
@@ -843,18 +959,57 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { reports });
   }
 
+  // event lifecycle (host-only — kept off the public proxy like other controls)
+  if (method === 'GET' && p === '/api/event') {
+    return send(res, 200, { event: publicEvent(), archive: eventsArchive });
+  }
+
+  if (method === 'POST' && p === '/api/event/open') {
+    if (event && event.status === 'open') {
+      return send(res, 409, { error: 'an event is already open; close it first' });
+    }
+    const body = await readBody(req);
+    return send(res, 200, { event: openEvent(body.title) });
+  }
+
+  if (method === 'POST' && p === '/api/event/close') {
+    if (!event || event.status !== 'open') {
+      return send(res, 409, { error: 'no open event to close' });
+    }
+    return send(res, 200, { event: closeEvent() });
+  }
+
+  // host: reopen a past event's archived output (reports/history/attendees by tag)
+  if (method === 'GET' && p === '/api/event/archive') {
+    const id = url.searchParams.get('id');
+    if (!id) return send(res, 200, { archive: eventsArchive });
+    const archived = eventsArchive.find(e => e.id === id) ||
+      (event && event.id === id ? publicEvent() : null);
+    if (!archived) return send(res, 404, { error: 'unknown event' });
+    return send(res, 200, {
+      event: archived,
+      reports: reports.filter(report => report.eventId === id),
+      history: playHistory.filter(entry => entry.eventId === id),
+      attendees: Array.from(identities.entries())
+        .filter(([, identity]) => identity.eventId === id)
+        .map(([token, identity]) => ({ token, ...participantProfile(identity) })),
+    });
+  }
+
   // admin: mint a new attendee
   if (method === 'POST' && p === '/api/mint') {
     return send(res, 200, createIdentity());
   }
 
-  // guest: self-join and receive an identity
+  // guest: self-join and receive an identity (only while an event is open)
   if (method === 'POST' && p === '/api/join') {
+    if (!requireOpenEvent(res)) return;
     return send(res, 200, createIdentity());
   }
 
   // guest: opt-in project profile used by spotlight and evidence searches
   if (method === 'POST' && p === '/api/profile') {
+    if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
@@ -870,6 +1025,7 @@ const server = http.createServer(async (req, res) => {
 
   // guest: evolve the room's generative animation controls
   if (method === 'POST' && p === '/api/visuals') {
+    if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
@@ -889,6 +1045,7 @@ const server = http.createServer(async (req, res) => {
 
   // guest: phone motion triggers a short visual response, rate-limited per person
   if (method === 'POST' && p === '/api/gesture') {
+    if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
@@ -1033,12 +1190,14 @@ const server = http.createServer(async (req, res) => {
 
   // queue a track
   if (method === 'POST' && p === '/api/queue') {
+    if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
     if (!body.videoId || !body.title) return send(res, 400, { error: 'missing videoId/title' });
     const entry = {
       id: crypto.randomBytes(4).toString('hex'),
+      eventId: currentEventId(),
       requesterToken: body.token,
       requesterName: identityDisplayName(id),
       color: id.color,
@@ -1072,6 +1231,7 @@ const server = http.createServer(async (req, res) => {
 
   // guest: toggle one upvote on a queued track
   if (method === 'POST' && p === '/api/upvote') {
+    if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });

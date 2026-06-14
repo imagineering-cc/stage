@@ -111,6 +111,91 @@
       margin: 0 auto 1.5rem;
       max-width: 640px;
     }
+
+    /* ── Event panel ── */
+    #event-panel {
+      border-width: 2px;
+    }
+    #event-panel.open { border-color: rgba(52,211,153,0.55); }
+    #event-panel.closed { border-color: var(--border); opacity: 0.96; }
+    .event-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.5rem;
+    }
+    #event-title-display {
+      font-size: 1.15rem;
+      font-weight: 700;
+      flex: 1;
+      min-width: 0;
+      word-break: break-word;
+    }
+    .event-status-badge {
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .event-status-badge.open {
+      border-color: rgba(52,211,153,0.5);
+      color: #34d399;
+      background: rgba(52,211,153,0.12);
+    }
+    .event-status-badge.closed {
+      border-color: rgba(248,113,113,0.45);
+      color: #f87171;
+      background: rgba(248,113,113,0.1);
+    }
+    #event-meta {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.4;
+      margin-bottom: 0.85rem;
+    }
+    #event-meta strong { color: var(--text); font-weight: 600; }
+    .event-open-form {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    #event-title-input {
+      flex: 1;
+      min-width: 12rem;
+      background: #0d0d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 0.5rem 0.6rem;
+    }
+    #event-feedback {
+      margin-top: 0.65rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+      min-height: 1rem;
+    }
+    #event-feedback.error { color: #f87171; }
+    .danger-btn {
+      background: transparent;
+      border: 1px solid rgba(248,113,113,0.5);
+      color: #f87171;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 700;
+      padding: 0.55rem 0.9rem;
+    }
+    .danger-btn:hover { background: rgba(248,113,113,0.12); }
+    .danger-btn:disabled { opacity: 0.45; cursor: default; }
     .panel h2 {
       font-size: 0.7rem;
       text-transform: uppercase;
@@ -499,6 +584,23 @@
     <button id="qr-close" onclick="closeQR()">Done</button>
   </div>
 
+	  <section class="panel closed" id="event-panel">
+	    <h2>Event</h2>
+	    <div class="event-header">
+	      <div id="event-title-display">No event open</div>
+	      <span class="event-status-badge closed" id="event-status-badge">Closed</span>
+	    </div>
+	    <div id="event-meta">Open an event so guests can join.</div>
+	    <div class="event-open-form" id="event-open-form">
+	      <input id="event-title-input" type="text" value="Imagineering Meetup" placeholder="Event title" aria-label="Event title">
+	      <button class="action-btn" id="event-open-btn" onclick="openEvent()">Open event</button>
+	    </div>
+	    <div class="event-close-form" id="event-close-form" hidden>
+	      <button class="danger-btn" id="event-close-btn" onclick="closeEvent()">Close event</button>
+	    </div>
+	    <div id="event-feedback" role="status"></div>
+	  </section>
+
 	  <section class="panel">
 	    <h2>Join</h2>
     <div class="join-row">
@@ -624,6 +726,11 @@
       try {
 	        const data = JSON.parse(e.data);
           const state = data.state || data;
+          if (Object.prototype.hasOwnProperty.call(data, 'event')) {
+            renderEvent(data.event);
+          } else if (Object.prototype.hasOwnProperty.call(state, 'event')) {
+            renderEvent(state.event);
+          }
 	        renderPlayback(state);
 		        renderTimer(state.timer);
 		        renderMode(state.mode);
@@ -633,6 +740,121 @@
 			        loadHistory();
 	      } catch {}
     };
+
+    // ── Event session ─────────────────────────────────────
+    let currentEvent = null;
+
+    function formatEventTime(value) {
+      if (!value) return '';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime())
+        ? ''
+        : date.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    function setEventFeedback(message = '', isError = false) {
+      const el = document.getElementById('event-feedback');
+      el.textContent = message;
+      el.classList.toggle('error', isError && !!message);
+    }
+
+    // Drive the Event panel purely from the SSE `event` field so it stays live.
+    function renderEvent(event) {
+      currentEvent = event || null;
+      const isOpen = !!currentEvent && currentEvent.status === 'open';
+      const panel = document.getElementById('event-panel');
+      const titleEl = document.getElementById('event-title-display');
+      const badge = document.getElementById('event-status-badge');
+      const meta = document.getElementById('event-meta');
+      const openForm = document.getElementById('event-open-form');
+      const closeForm = document.getElementById('event-close-form');
+
+      panel.classList.toggle('open', isOpen);
+      panel.classList.toggle('closed', !isOpen);
+      badge.classList.toggle('open', isOpen);
+      badge.classList.toggle('closed', !isOpen);
+      badge.textContent = isOpen ? 'Open' : 'Closed';
+
+      if (currentEvent) {
+        titleEl.textContent = currentEvent.title || 'Untitled event';
+      } else {
+        titleEl.textContent = 'No event open';
+      }
+
+      if (isOpen) {
+        const opened = formatEventTime(currentEvent.openedAt);
+        meta.innerHTML = `<strong>Guests can join.</strong>${opened ? ` Opened ${esc(opened)}.` : ''}`;
+        openForm.hidden = true;
+        closeForm.hidden = false;
+      } else {
+        const closed = currentEvent ? formatEventTime(currentEvent.closedAt) : '';
+        meta.innerHTML = currentEvent
+          ? `Room closed — guests cannot join.${closed ? ` Closed ${esc(closed)}.` : ''} Open an event to start a new show.`
+          : 'Room closed — guests cannot join. Open an event so guests can join.';
+        openForm.hidden = false;
+        closeForm.hidden = true;
+      }
+    }
+
+    async function loadEvent() {
+      try {
+        const res = await fetch(`${API}/api/event`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderEvent(data.event);
+      } catch {}
+    }
+
+    async function openEvent() {
+      const input = document.getElementById('event-title-input');
+      const title = (input.value || '').trim() || 'Imagineering Meetup';
+      const btn = document.getElementById('event-open-btn');
+      btn.disabled = true;
+      setEventFeedback('Opening event...');
+      try {
+        const res = await fetch(`${API}/api/event/open`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409) {
+          setEventFeedback('An event is already open. Close it before opening a new one.', true);
+          loadEvent();
+          return;
+        }
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        renderEvent(data.event);
+        setEventFeedback('Event open — guests can join.');
+      } catch (err) {
+        setEventFeedback(`Open failed: ${err.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function closeEvent() {
+      if (!confirm('Close the event? This ends the show and archives it.')) return;
+      const btn = document.getElementById('event-close-btn');
+      btn.disabled = true;
+      setEventFeedback('Closing event...');
+      try {
+        const res = await fetch(`${API}/api/event/close`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409) {
+          setEventFeedback('No event is currently open.', true);
+          loadEvent();
+          return;
+        }
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        renderEvent(data.event || null);
+        setEventFeedback('Event closed and archived.');
+      } catch (err) {
+        setEventFeedback(`Close failed: ${err.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    }
 
     // ── Render playback ───────────────────────────────────
 	    function trackHTML(track, showSkip = false) {
@@ -1285,6 +1507,7 @@
     }
 
 		    loadConfig();
+		    loadEvent();
 			    loadAttendees();
 		    loadHistory();
         loadReports();
