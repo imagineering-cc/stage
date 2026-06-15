@@ -178,6 +178,76 @@
     50%       { transform: scale(1.6); opacity: 1; }
   }
 
+  /* ─── CLOSED / RESTING STATE ─────────────────────────── */
+  /* Shown when no event is open. The generative Canvas keeps breathing
+     behind it; this is a calm, screensaver-like foreground that replaces
+     the now-playing / queue / spotlight show until a host opens the room. */
+  #closed {
+    position: fixed; inset: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 26px;
+    padding: 64px;
+    text-align: center;
+    opacity: 0;
+    visibility: hidden;
+    transform: scale(1.012);
+    transition: opacity 0.8s ease, transform 0.8s ease, visibility 0s linear 0.8s;
+  }
+  #closed.show {
+    opacity: 1;
+    visibility: visible;
+    transform: scale(1);
+    transition-delay: 0s;
+  }
+  /* When the room is resting, suppress every live foreground layer so the
+     closed screensaver owns the screen. The Canvas (z-index 0) stays. */
+  body.room-closed #idle,
+  body.room-closed #playing,
+  body.room-closed #spotlight-overlay,
+  body.room-closed #phase-pill,
+  body.room-closed #visual-toast {
+    opacity: 0 !important;
+    visibility: hidden !important;
+    pointer-events: none;
+  }
+  .closed-wordmark {
+    font-size: 88px;
+    font-weight: 800;
+    letter-spacing: -3px;
+    background: linear-gradient(135deg, #c4b5fd 0%, #818cf8 40%, #38bdf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: wordmarkPulse 6s ease-in-out infinite;
+  }
+  .closed-title {
+    max-width: 1100px;
+    color: var(--text-primary);
+    font-size: clamp(40px, 5vw, 92px);
+    font-weight: 800;
+    line-height: 1.04;
+    letter-spacing: -1px;
+  }
+  .closed-sub {
+    color: var(--text-muted);
+    font-size: clamp(22px, 2.4vw, 40px);
+    font-weight: 500;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+  }
+  .closed-orb {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: hsl(247,60%,65%);
+    margin-top: 8px;
+    animation: orbBreathe 3s ease-in-out infinite;
+    box-shadow: 0 0 12px 4px hsl(247,60%,55%);
+  }
+
   /* ─── ROOM PHASE ──────────────────────────────────────── */
   #phase-pill {
     --phase-color: #818cf8;
@@ -1057,6 +1127,14 @@
   </div>
 </div>
 
+<!-- ── CLOSED / RESTING ──────────────────────────── -->
+<div id="closed" aria-live="polite">
+  <div class="closed-wordmark">Dreamfinder</div>
+  <div class="closed-title" id="closed-title">The stage is resting</div>
+  <div class="closed-sub" id="closed-sub">see you next time</div>
+  <div class="closed-orb"></div>
+</div>
+
 <!-- ── PLAYING ───────────────────────────────────── -->
 <div id="playing">
   <div class="main-area">
@@ -1177,6 +1255,9 @@
 
   const idleEl      = document.getElementById('idle');
   const idleSub     = document.getElementById('idle-sub');
+  const closedEl    = document.getElementById('closed');
+  const closedTitle = document.getElementById('closed-title');
+  const closedSub   = document.getElementById('closed-sub');
   const playingEl   = document.getElementById('playing');
   const nowThumbWrap= document.getElementById('nowThumbWrap');
 	  const nowThumb    = document.getElementById('nowThumb');
@@ -1518,6 +1599,27 @@
   }
 
   // ── Render helpers ─────────────────────────────────────
+  // Room is OPEN only when an event exists AND its status is "open".
+  // Everything else (no event, or a closed event) is a resting room.
+  function isRoomOpen(event) {
+    return Boolean(event && event.status === 'open');
+  }
+
+  // Calm screensaver foreground for a resting room. The generative Canvas
+  // keeps animating behind it; we only swap the foreground layers.
+  function showClosed(event) {
+    document.body.classList.add('room-closed');
+    const title = event && typeof event.title === 'string' ? event.title.trim() : '';
+    closedTitle.textContent = title ? title.slice(0, 120) : 'The stage is resting';
+    closedSub.textContent = title ? 'see you next time' : 'the stage is resting';
+    closedEl.classList.add('show');
+  }
+
+  function hideClosed() {
+    document.body.classList.remove('room-closed');
+    closedEl.classList.remove('show');
+  }
+
   function showIdle() {
     idleEl.classList.remove('hidden');
     playingEl.classList.remove('visible');
@@ -1979,9 +2081,24 @@
   }
 
   // ── Main render ────────────────────────────────────────
-  function render({ nowPlaying, queue, timer, announcement, mode, visuals, visualEvent, spotlight }) {
+  function render({ nowPlaying, queue, timer, announcement, mode, visuals, visualEvent, spotlight, event }) {
+    // Ambient Canvas keeps breathing in every state, so visuals render first.
     renderVisuals(visuals);
     renderVisualEvent(visualEvent);
+
+    // When no event is open the room rests: show the screensaver and clear
+    // any live foreground (spotlight/timer/announcement) that might linger.
+    if (!isRoomOpen(event)) {
+      renderTimer(null);
+      renderAnnouncement(null);
+      renderSpotlight(null);
+      currentTrackId = null;
+      showIdle();          // settle idle/playing toggles to a known state…
+      showClosed(event);   // …then the closed overlay supersedes them.
+      return;
+    }
+
+    hideClosed();
     renderMode(mode);
     renderTimer(timer);
     renderAnnouncement(announcement);

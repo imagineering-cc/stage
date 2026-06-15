@@ -267,6 +267,10 @@ stage/
 | POST   | `/api/skip`         | Stop current track, advance queue             |
 | GET    | `/api/history`      | Host-only recent played tracks                |
 | GET    | `/api/reports`      | Host-only archived spotlight reports/results  |
+| GET    | `/api/event`        | Host-only current event + archive list        |
+| POST   | `/api/event/open`   | Host opens a fresh event `{title}`; 409 if already open |
+| POST   | `/api/event/close`  | Host closes + archives the open event; 409 if none |
+| GET    | `/api/event/archive`| Host-only past events; `?id=` returns that event's reports/history/attendees |
 | POST   | `/api/mode`         | Host-only room phase selection                |
 | POST   | `/api/spotlight/start` | Host begins a consented intro/progress turn |
 | POST   | `/api/spotlight/transcript` | Host streams browser speech recognition text |
