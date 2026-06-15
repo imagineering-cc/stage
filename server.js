@@ -24,6 +24,9 @@ const OPENAI_MODEL = process.env.STAGE_OPENAI_MODEL || 'gpt-5.4-mini';
 const GITHUB_TOKEN = process.env.STAGE_GITHUB_TOKEN || '';
 const SHOW_MODES = new Set(['welcome', 'free-jukebox', 'sprint-build', 'sprint-share', 'sprint-break', 'cool-down']);
 const VISUAL_THEMES = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
+// Closed set of event states — a frozen constant so the room's state machine
+// can't be driven by a stray string literal typo.
+const EVENT_STATUS = Object.freeze({ OPEN: 'open', CLOSED: 'closed' });
 
 // --- name generator (Dreamfinder handles) ---
 const ADJECTIVES = ['Indigo','Velvet','Crimson','Silver','Golden','Cobalt','Amber','Jade','Coral','Ivory','Onyx','Ruby','Saffron','Azure','Verdant','Lilac','Russet','Ochre','Pearl','Obsidian'];
@@ -85,7 +88,7 @@ function normalizeEvent(value) {
   return {
     id: value.id,
     title: cleanText(value.title, 100) || 'Imagineering Meetup',
-    status: value.status === 'open' ? 'open' : 'closed',
+    status: value.status === EVENT_STATUS.OPEN ? EVENT_STATUS.OPEN : EVENT_STATUS.CLOSED,
     openedAt: Number(value.openedAt) || null,
     closedAt: Number(value.closedAt) || null,
   };
@@ -100,8 +103,10 @@ const eventsArchive = Array.isArray(savedState.eventsArchive)
 // (no identities, no queue) start closed: the host opens the first event.
 if (!event && (identities.size > 0 || queue.length > 0)) {
   const migratedId = crypto.randomBytes(6).toString('hex');
-  event = { id: migratedId, title: 'Imagineering Meetup', status: 'open', openedAt: Date.now(), closedAt: null };
-  for (const identity of identities.values()) if (!identity.eventId) identity.eventId = migratedId;
+  event = { id: migratedId, title: 'Imagineering Meetup', status: EVENT_STATUS.OPEN, openedAt: Date.now(), closedAt: null };
+  // Identities carry an eventIds *array*: a participant may attend many events,
+  // so attendance is many-to-many, not a single bolted-on id.
+  for (const identity of identities.values()) if (!Array.isArray(identity.eventIds)) identity.eventIds = [migratedId];
   for (const track of queue) if (!track.eventId) track.eventId = migratedId;
   for (const entry of playHistory) if (!entry.eventId) entry.eventId = migratedId;
   for (const report of reports) if (!report.eventId) report.eventId = migratedId;
@@ -171,7 +176,8 @@ function createIdentity() {
   const token = crypto.randomBytes(16).toString('hex');
   const name = generateName();
   const color = colorForName(name);
-  identities.set(token, { name, color, mintedAt: Date.now(), eventId: currentEventId() });
+  const eventId = currentEventId();
+  identities.set(token, { name, color, mintedAt: Date.now(), eventIds: eventId ? [eventId] : [] });
   savePersistentState();
   return { token, name, color };
 }
@@ -388,7 +394,19 @@ function clearAnnouncement() {
 // The id of the event new participation should be tagged with, or null when no
 // event is open (which is also the signal that guest routes must be rejected).
 function currentEventId() {
-  return event && event.status === 'open' ? event.id : null;
+  return event && event.status === EVENT_STATUS.OPEN ? event.id : null;
+}
+
+// Record that an identity participated in the currently open event. Attendance
+// is many-to-many (a returning guest, whose token skips /api/join, attends
+// several events), so we append to an eventIds array rather than overwriting a
+// single id — otherwise returning guests stay bolted to their first event and
+// vanish from later events' recaps ("ghost attendees").
+function markAttendance(id) {
+  const eventId = currentEventId();
+  if (!eventId || !id) return;
+  if (!Array.isArray(id.eventIds)) id.eventIds = [];
+  if (!id.eventIds.includes(eventId)) id.eventIds.push(eventId);
 }
 
 // What every surface sees about the event. Phase is read from `mode` (its
@@ -408,7 +426,7 @@ function publicEvent() {
 // Guard for guest-mutating routes: 403 with a client-detectable flag when the
 // room is closed. Returns true to proceed, false after having already replied.
 function requireOpenEvent(res) {
-  if (event && event.status === 'open') return true;
+  if (event && event.status === EVENT_STATUS.OPEN) return true;
   send(res, 403, { error: 'No event is running right now.', eventClosed: true });
   return false;
 }
@@ -420,7 +438,7 @@ function stopPlayback() {
 
 function archiveCurrentEvent() {
   if (!event) return;
-  const closed = { ...event, status: 'closed', closedAt: event.closedAt || Date.now() };
+  const closed = { ...event, status: EVENT_STATUS.CLOSED, closedAt: event.closedAt || Date.now() };
   const existing = eventsArchive.findIndex(e => e.id === closed.id);
   if (existing >= 0) eventsArchive[existing] = closed;
   else eventsArchive.unshift(closed);
@@ -433,6 +451,9 @@ function archiveCurrentEvent() {
 function openEvent(title) {
   stopPlayback();
   queue.splice(0, queue.length);
+  // Reset the fair-rotation cursor too, so a fresh meetup doesn't inherit the
+  // previous event's requester-ordering pointer (which references dead tokens).
+  for (const key of Object.keys(lastPlayedRequesterByVotes)) delete lastPlayedRequesterByVotes[key];
   if (spotlight) { archiveSpotlight(); spotlight = null; }
   clearTimer();
   clearAnnouncement();
@@ -440,7 +461,7 @@ function openEvent(title) {
   event = {
     id: crypto.randomBytes(6).toString('hex'),
     title: cleanText(title, 100) || 'Imagineering Meetup',
-    status: 'open',
+    status: EVENT_STATUS.OPEN,
     openedAt: Date.now(),
     closedAt: null,
   };
@@ -454,10 +475,14 @@ function openEvent(title) {
 function closeEvent() {
   if (!event) return null;
   stopPlayback();
+  // Clear the queue so a closed room actually goes quiet: stopPlayback's mpv
+  // `stop` triggers the idle observer → playNext, which would otherwise play
+  // the next queued track in a room that's supposed to be resting.
+  queue.splice(0, queue.length);
   if (spotlight) { archiveSpotlight(); spotlight = null; }
   clearTimer();
   clearAnnouncement();
-  event = { ...event, status: 'closed', closedAt: Date.now() };
+  event = { ...event, status: EVENT_STATUS.CLOSED, closedAt: Date.now() };
   archiveCurrentEvent();
   savePersistentState();
   broadcast();
@@ -527,6 +552,9 @@ function listenMpvEvents() {
 }
 
 async function playNext() {
+  // No playback without an open event — closing stops the show even if the mpv
+  // idle observer fires after the queue was cleared.
+  if (!currentEventId()) { nowPlaying = null; broadcast(); return; }
   if (!queue.length) { nowPlaying = null; broadcast(); return; }
   sortQueue();
   const next = queue.shift();
@@ -878,7 +906,7 @@ function archiveSpotlight() {
   if (!spotlight || !spotlight.transcript) return;
   reports.unshift({
     id: spotlight.id,
-    eventId: currentEventId(),
+    eventId: spotlight.eventId || currentEventId(),
     participantName: spotlight.participantName,
     projectTitle: spotlight.projectTitle,
     kind: spotlight.kind,
@@ -965,7 +993,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === 'POST' && p === '/api/event/open') {
-    if (event && event.status === 'open') {
+    if (event && event.status === EVENT_STATUS.OPEN) {
       return send(res, 409, { error: 'an event is already open; close it first' });
     }
     const body = await readBody(req);
@@ -973,7 +1001,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === 'POST' && p === '/api/event/close') {
-    if (!event || event.status !== 'open') {
+    if (!event || event.status !== EVENT_STATUS.OPEN) {
       return send(res, 409, { error: 'no open event to close' });
     }
     return send(res, 200, { event: closeEvent() });
@@ -990,9 +1018,9 @@ const server = http.createServer(async (req, res) => {
       event: archived,
       reports: reports.filter(report => report.eventId === id),
       history: playHistory.filter(entry => entry.eventId === id),
-      attendees: Array.from(identities.entries())
-        .filter(([, identity]) => identity.eventId === id)
-        .map(([token, identity]) => ({ token, ...participantProfile(identity) })),
+      attendees: Array.from(identities.values())
+        .filter(identity => Array.isArray(identity.eventIds) && identity.eventIds.includes(id))
+        .map(identity => participantProfile(identity)),
     });
   }
 
@@ -1013,6 +1041,7 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
+    markAttendance(id);
     id.projectTitle = cleanText(body.projectTitle, 100);
     id.projectDescription = cleanText(body.projectDescription, 420);
     id.githubHandle = normalizeGithubHandle(body.githubHandle);
@@ -1029,6 +1058,7 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
+    markAttendance(id);
     visuals = normalizeVisuals({
       ...visuals,
       theme: body.theme ?? visuals.theme,
@@ -1049,6 +1079,7 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
+    markAttendance(id);
     if (body.type !== 'shake') return send(res, 400, { error: 'unknown gesture' });
     const lastAt = gestureTimes.get(body.token) || 0;
     if (Date.now() - lastAt < 900) return send(res, 429, { error: 'shake too frequent' });
@@ -1127,6 +1158,7 @@ const server = http.createServer(async (req, res) => {
     const kind = body.kind === 'progress' ? 'progress' : 'introduction';
     spotlight = {
       id: crypto.randomBytes(5).toString('hex'),
+      eventId: currentEventId(),
       active: true,
       participantToken: body.token,
       participantName: identityDisplayName(id),
@@ -1194,6 +1226,7 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
+    markAttendance(id);
     if (!body.videoId || !body.title) return send(res, 400, { error: 'missing videoId/title' });
     const entry = {
       id: crypto.randomBytes(4).toString('hex'),
@@ -1235,6 +1268,7 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
+    markAttendance(id);
     const track = queue.find(item => item.id === body.trackId);
     if (!track) return send(res, 404, { error: 'track is no longer queued' });
     if (track.requesterToken === body.token) {
