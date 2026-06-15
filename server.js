@@ -15,8 +15,6 @@ const {
   PORT,
   MPV_SOCK,
   PUBLIC_DIR,
-  STATE_FILE,
-  HISTORY_LIMIT,
   REPORT_LIMIT,
   AUDIO_ENABLED,
   JOIN_URL,
@@ -24,49 +22,56 @@ const {
   OPENAI_MODEL,
   GITHUB_TOKEN,
   SHOW_MODES,
-  VISUAL_THEMES,
 } = require('./config');
 // Closed set of event states — a frozen constant so the room's state machine
 // can't be driven by a stray string literal typo.
 const EVENT_STATUS = Object.freeze({ OPEN: 'open', CLOSED: 'closed' });
 
-// --- name generator (Dreamfinder handles) ---
-const { generateName, colorForName } = require('./names');
-
 // --- state ---
-function loadPersistentState() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    return raw && typeof raw === 'object' ? raw : {};
-  } catch (err) {
-    if (err.code !== 'ENOENT') console.error('state load failed', err.message);
-    return {};
-  }
-}
+// The mutable-state nexus lives in state.js, which OWNS every shared mutable
+// global. Reassigned scalars (nowPlaying/timer/mode/announcement/visuals/
+// visualEvent/spotlight) are held as fields on the exported `room` holder and
+// read fresh as `room.x`; reference-stable containers (identities/queue/...) are
+// shared by live reference. state.js reaches back into sse-hub/mpv/event-session
+// via its mutable `hooks` registry, wired by this composition root below.
+const state = require('./state');
+const {
+  room,
+  identities,
+  queue,
+  playHistory,
+  reports,
+  lastPlayedRequesterByVotes,
+  sseClients,
+  gestureTimes,
+  loadPersistentState,
+  savePersistentState,
+  createIdentity,
+  clamp,
+  cleanText,
+  normalizeGithubHandle,
+  identityDisplayName,
+  normalizeVisuals,
+  currentVisualEvent,
+  participantProfile,
+  voteCount,
+  publicTrack,
+  publicQueue,
+  publicSpotlight,
+  hostSpotlight,
+  sortQueue,
+  recordPlay,
+  currentTimer,
+  markTimerEnded,
+  startTimer,
+  armTimerTimeout,
+  clearTimer,
+  currentAnnouncement,
+  showAnnouncement,
+  clearAnnouncement,
+} = state;
 
 const savedState = loadPersistentState();
-const savedIdentities = Array.isArray(savedState.identities)
-  ? savedState.identities.filter(item => Array.isArray(item) && item.length === 2)
-  : [];
-const identities = new Map(savedIdentities); // token -> { name, color, mintedAt }
-const playHistory = Array.isArray(savedState.playHistory)
-  ? savedState.playHistory.slice(0, HISTORY_LIMIT)
-  : [];
-const reports = Array.isArray(savedState.reports)
-  ? savedState.reports.slice(0, REPORT_LIMIT)
-  : [];
-const queue = Array.isArray(savedState.queue)
-  ? savedState.queue.filter(track => track && typeof track.id === 'string')
-  : [];                       // [{ id, requesterToken, requesterName, color, videoId, title, thumbnail, addedAt, voterTokens }]
-let nowPlaying = null;        // { ...trackEntry } | null
-const lastPlayedRequesterByVotes = savedState.lastPlayedRequesterByVotes &&
-  typeof savedState.lastPlayedRequesterByVotes === 'object'
-  ? { ...savedState.lastPlayedRequesterByVotes }
-  : { 0: savedState.lastPlayedRequesterToken || null };
-const sseClients = new Set(); // { res, includeSpotlight } stream clients
-let timer = savedState.timer && typeof savedState.timer === 'object' ? savedState.timer : null;
-let timerTimeout = null;
-let mode = SHOW_MODES.has(savedState.mode) ? savedState.mode : 'free-jukebox';
 
 // --- event session lifecycle ---
 // One host-controlled event gates all guest participation. With no open event,
@@ -101,195 +106,19 @@ if (!event && (identities.size > 0 || queue.length > 0)) {
   for (const entry of playHistory) if (!entry.eventId) entry.eventId = migratedId;
   for (const report of reports) if (!report.eventId) report.eventId = migratedId;
 }
-let announcement = null;      // { id, title, message, detail, createdAt, expiresAt, color } | null
-let announcementTimeout = null;
-let visuals = normalizeVisuals(savedState.visuals);
-let visualEvent = null;       // short-lived phone gesture effect; never persisted
-let spotlight = null;         // consented live speech transcript; archived only when explicitly ended
-const gestureTimes = new Map();
 
-function clamp(value, min, max, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
-}
-
-function cleanText(value, maxLength) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
-}
-
-function normalizeGithubHandle(value) {
-  const handle = cleanText(value, 39).replace(/^@/, '');
-  return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(handle) ? handle : '';
-}
-
-function identityDisplayName(id) {
-  const handle = normalizeGithubHandle(id?.githubHandle);
-  return handle ? `@${handle}` : cleanText(id?.name, 60);
-}
-
-function normalizeVisuals(value) {
-  const data = value && typeof value === 'object' ? value : {};
-  return {
-    theme: VISUAL_THEMES.has(data.theme) ? data.theme : 'aurora',
-    energy: clamp(data.energy, 0, 1, 0.56),
-    complexity: clamp(data.complexity, 0, 1, 0.62),
-    hue: Math.round(clamp(data.hue, 0, 360, 212)),
-    editedBy: cleanText(data.editedBy, 60),
-    editedAt: Number(data.editedAt) || null,
-  };
-}
-
-function savePersistentState() {
-  const tmp = `${STATE_FILE}.${process.pid}.tmp`;
-  const data = JSON.stringify({
-    identities: Array.from(identities.entries()),
-    playHistory,
-    queue,
-    lastPlayedRequesterByVotes,
-    timer,
-    mode,
-    visuals,
-    reports,
-    event,
-    eventsArchive,
-  }, null, 2);
-  try {
-    fs.writeFileSync(tmp, data, { mode: 0o600 });
-    fs.renameSync(tmp, STATE_FILE);
-  } catch (err) {
-    console.error('state save failed', err.message);
-    try { fs.unlinkSync(tmp); } catch (_) {}
-  }
-}
-
-function createIdentity() {
-  const token = crypto.randomBytes(16).toString('hex');
-  const name = generateName();
-  const color = colorForName(name);
-  const eventId = currentEventId();
-  identities.set(token, { name, color, mintedAt: Date.now(), eventIds: eventId ? [eventId] : [] });
-  savePersistentState();
-  return { token, name, color };
-}
-
-function markTimerEnded() {
-  if (!timer || timer.status !== 'running') return;
-  timer = { ...timer, status: 'ended', endedAt: Date.now() };
-  savePersistentState();
-}
-
-function currentTimer() {
-  if (timer?.status === 'running' && Date.now() >= timer.endsAt) {
-    markTimerEnded();
-  }
-  return timer;
-}
-
-function voteCount(track) {
-  return Array.isArray(track?.voterTokens) ? track.voterTokens.length : 0;
-}
-
-function publicTrack(track) {
-  if (!track) return null;
-  const { requesterToken, voterTokens, ...out } = track;
-  const requester = identities.get(requesterToken);
-  return {
-    ...out,
-    requesterName: requester ? identityDisplayName(requester) : out.requesterName,
-    votes: voteCount(track),
-  };
-}
-
-function publicQueue() {
-  return queue.map(publicTrack);
-}
-
-function participantProfile(id) {
-  return {
-    name: identityDisplayName(id),
-    dreamfinderName: id.name,
-    color: id.color,
-    projectTitle: cleanText(id.projectTitle, 100),
-    projectDescription: cleanText(id.projectDescription, 420),
-    githubHandle: normalizeGithubHandle(id.githubHandle),
-    consentRecording: id.consentRecording === true,
-    consentResearch: id.consentResearch === true,
-  };
-}
-
-function currentVisualEvent() {
-  if (visualEvent && Date.now() - visualEvent.at > 5000) visualEvent = null;
-  return visualEvent;
-}
-
-function publicSpotlight() {
-  if (!spotlight) return null;
-  const { participantToken, ...visible } = spotlight;
-  return visible;
-}
-
-function hostSpotlight() {
-  if (!spotlight) return null;
-  return { ...publicSpotlight(), participantToken: spotlight.participantToken };
-}
-
-function rotateRequesterOrder(tokens, votes) {
-  const current = tokens.indexOf(lastPlayedRequesterByVotes[String(votes)]);
-  if (current < 0) return tokens;
-  return tokens.slice(current + 1).concat(tokens.slice(0, current + 1));
-}
-
-function scheduleVoteBand(tracks, votes) {
-  const byRequester = new Map();
-  for (const track of tracks.sort((a, b) => a.addedAt - b.addedAt)) {
-    const token = track.requesterToken || track.requesterName;
-    if (!byRequester.has(token)) byRequester.set(token, []);
-    byRequester.get(token).push(track);
-  }
-  const order = rotateRequesterOrder(Array.from(byRequester.keys()), votes);
-  const scheduled = [];
-  let remaining = true;
-  while (remaining) {
-    remaining = false;
-    for (const token of order) {
-      const next = byRequester.get(token).shift();
-      if (next) {
-        scheduled.push(next);
-        remaining = true;
-      }
-    }
-  }
-  return scheduled;
-}
-
-function sortQueue() {
-  const voteBands = new Map();
-  for (const track of queue) {
-    const votes = voteCount(track);
-    if (!voteBands.has(votes)) voteBands.set(votes, []);
-    voteBands.get(votes).push(track);
-  }
-  const ranked = Array.from(voteBands.keys())
-    .sort((a, b) => b - a)
-    .flatMap(votes => scheduleVoteBand(voteBands.get(votes), votes));
-  queue.splice(0, queue.length, ...ranked);
-}
-
-function recordPlay(track) {
-  playHistory.unshift({ ...publicTrack(track), eventId: track.eventId || currentEventId(), playedAt: Date.now() });
-  playHistory.length = Math.min(playHistory.length, HISTORY_LIMIT);
-  savePersistentState();
-}
-
+// --- SSE payload + broadcast ---
+// These read state but BELONG to sse-hub (state must not depend on sse), so they
+// stay here in the composition root; state.js calls broadcast via its `hooks`.
 function statePayload({ includeSpotlight = false } = {}) {
   const payload = {
     event: publicEvent(),
-    nowPlaying: publicTrack(nowPlaying),
+    nowPlaying: publicTrack(room.nowPlaying),
     queue: publicQueue(),
     timer: currentTimer(),
-    mode,
+    mode: room.mode,
     announcement: currentAnnouncement(),
-    visuals,
+    visuals: room.visuals,
     visualEvent: currentVisualEvent(),
   };
   if (includeSpotlight) payload.spotlight = hostSpotlight();
@@ -304,80 +133,6 @@ function broadcast() {
       client.res.write(`data: ${client.includeSpotlight ? showPayload : publicPayload}\n\n`);
     } catch(e) {}
   }
-}
-
-function startTimer({ durationMs, label }) {
-  if (timerTimeout) clearTimeout(timerTimeout);
-  const now = Date.now();
-  timer = {
-    id: crypto.randomBytes(4).toString('hex'),
-    label: label || 'Sprint',
-    durationMs,
-    startedAt: now,
-    endsAt: now + durationMs,
-    status: 'running',
-  };
-  armTimerTimeout();
-  savePersistentState();
-  broadcast();
-  return timer;
-}
-
-function armTimerTimeout() {
-  if (timerTimeout) clearTimeout(timerTimeout);
-  if (!timer || timer.status !== 'running') return;
-  const remaining = timer.endsAt - Date.now();
-  if (remaining <= 0) {
-    markTimerEnded();
-    broadcast();
-    return;
-  }
-  timerTimeout = setTimeout(() => {
-    markTimerEnded();
-    broadcast();
-  }, Math.min(remaining, 2147483647));
-}
-
-function clearTimer() {
-  if (timerTimeout) clearTimeout(timerTimeout);
-  timerTimeout = null;
-  timer = null;
-  savePersistentState();
-  broadcast();
-}
-
-function currentAnnouncement() {
-  if (announcement && Date.now() >= announcement.expiresAt) {
-    announcement = null;
-  }
-  return announcement;
-}
-
-function showAnnouncement({ title, message, detail, durationMs, color }) {
-  if (announcementTimeout) clearTimeout(announcementTimeout);
-  const now = Date.now();
-  announcement = {
-    id: crypto.randomBytes(4).toString('hex'),
-    title: String(title || 'Dreamfinder').slice(0, 80),
-    message: String(message || '').slice(0, 180),
-    detail: String(detail || '').slice(0, 180),
-    color: String(color || '#fbbf24').slice(0, 40),
-    createdAt: now,
-    expiresAt: now + durationMs,
-  };
-  announcementTimeout = setTimeout(() => {
-    announcement = null;
-    broadcast();
-  }, Math.min(durationMs, 2147483647));
-  broadcast();
-  return announcement;
-}
-
-function clearAnnouncement() {
-  if (announcementTimeout) clearTimeout(announcementTimeout);
-  announcementTimeout = null;
-  announcement = null;
-  broadcast();
 }
 
 // --- event lifecycle helpers ---
@@ -407,7 +162,7 @@ function publicEvent() {
     id: event.id,
     title: event.title,
     status: event.status,
-    phase: mode,
+    phase: room.mode,
     openedAt: event.openedAt,
     closedAt: event.closedAt,
   };
@@ -422,7 +177,7 @@ function requireOpenEvent(res) {
 }
 
 function stopPlayback() {
-  nowPlaying = null;
+  room.nowPlaying = null;
   if (AUDIO_ENABLED) mpvSend(['stop']).catch(() => {});
 }
 
@@ -444,10 +199,10 @@ function openEvent(title) {
   // Reset the fair-rotation cursor too, so a fresh meetup doesn't inherit the
   // previous event's requester-ordering pointer (which references dead tokens).
   for (const key of Object.keys(lastPlayedRequesterByVotes)) delete lastPlayedRequesterByVotes[key];
-  if (spotlight) { archiveSpotlight(); spotlight = null; }
+  if (room.spotlight) { archiveSpotlight(); room.spotlight = null; }
   clearTimer();
   clearAnnouncement();
-  mode = 'welcome';
+  room.mode = 'welcome';
   event = {
     id: crypto.randomBytes(6).toString('hex'),
     title: cleanText(title, 100) || 'Imagineering Meetup',
@@ -469,7 +224,7 @@ function closeEvent() {
   // `stop` triggers the idle observer → playNext, which would otherwise play
   // the next queued track in a room that's supposed to be resting.
   queue.splice(0, queue.length);
-  if (spotlight) { archiveSpotlight(); spotlight = null; }
+  if (room.spotlight) { archiveSpotlight(); room.spotlight = null; }
   clearTimer();
   clearAnnouncement();
   event = { ...event, status: EVENT_STATUS.CLOSED, closedAt: Date.now() };
@@ -532,7 +287,7 @@ function listenMpvEvents() {
       let msg; try { msg = JSON.parse(line); } catch(e) { continue; }
       if (msg.event === 'property-change' && msg.name === 'idle-active' && msg.data === true) {
         // mpv finished playing (or was idle from start). Advance.
-        if (nowPlaying) { nowPlaying = null; broadcast(); }
+        if (room.nowPlaying) { room.nowPlaying = null; broadcast(); }
         playNext();
       }
     }
@@ -544,13 +299,13 @@ function listenMpvEvents() {
 async function playNext() {
   // No playback without an open event — closing stops the show even if the mpv
   // idle observer fires after the queue was cleared.
-  if (!currentEventId()) { nowPlaying = null; broadcast(); return; }
-  if (!queue.length) { nowPlaying = null; broadcast(); return; }
+  if (!currentEventId()) { room.nowPlaying = null; broadcast(); return; }
+  if (!queue.length) { room.nowPlaying = null; broadcast(); return; }
   sortQueue();
   const next = queue.shift();
   lastPlayedRequesterByVotes[String(voteCount(next))] = next.requesterToken;
   sortQueue();
-  nowPlaying = next;
+  room.nowPlaying = next;
   recordPlay(next);
   broadcast();
   if (!AUDIO_ENABLED) return;
@@ -559,7 +314,7 @@ async function playNext() {
     await mpvSend(['loadfile', url, 'replace']);
   } catch(e) {
     console.error('mpv loadfile failed', e);
-    nowPlaying = null;
+    room.nowPlaying = null;
     broadcast();
     playNext();
   }
@@ -826,17 +581,17 @@ async function modelInsights(profile, transcript, baseline) {
 }
 
 async function developSpotlightInsights() {
-  if (!spotlight?.active) throw new Error('no active spotlight');
-  const spotlightId = spotlight.id;
-  const participantId = spotlight.participantToken;
+  if (!room.spotlight?.active) throw new Error('no active spotlight');
+  const spotlightId = room.spotlight.id;
+  const participantId = room.spotlight.participantToken;
   const participant = identities.get(participantId);
   if (!participant?.consentResearch) throw new Error('research consent required');
   const profile = participantProfile(participant);
-  const transcript = cleanText(spotlight.transcript, 6000);
+  const transcript = cleanText(room.spotlight.transcript, 6000);
   const terms = researchTerms(`${profile.projectTitle} ${profile.projectDescription} ${transcript}`);
   const opening = evidenceBasedInsights(profile, transcript, terms, [], []);
-  spotlight = {
-    ...spotlight,
+  room.spotlight = {
+    ...room.spotlight,
     status: 'researching',
     insights: {
       ...opening,
@@ -852,7 +607,7 @@ async function developSpotlightInsights() {
     arxivResearch(terms),
     openAlexResearch(terms, profile.projectTitle),
   ]);
-  if (!spotlight || spotlight.id !== spotlightId) throw new Error('spotlight changed');
+  if (!room.spotlight || room.spotlight.id !== spotlightId) throw new Error('spotlight changed');
   const sources = [
     ...github.sources.slice(0, 6),
     ...arxiv.slice(0, 3),
@@ -860,24 +615,24 @@ async function developSpotlightInsights() {
   ].slice(0, 12);
   const baseline = evidenceBasedInsights(profile, transcript, terms, sources, github.connections);
   const generated = await modelInsights(profile, transcript, baseline);
-  if (!spotlight || spotlight.id !== spotlightId) throw new Error('spotlight changed');
+  if (!room.spotlight || room.spotlight.id !== spotlightId) throw new Error('spotlight changed');
   const insights = generated || baseline;
-  spotlight = { ...spotlight, status: 'ready', insights: { ...insights, searchedAt: Date.now() } };
+  room.spotlight = { ...room.spotlight, status: 'ready', insights: { ...insights, searchedAt: Date.now() } };
   broadcast();
-  return spotlight.insights;
+  return room.spotlight.insights;
 }
 
 function archiveSpotlight() {
-  if (!spotlight || !spotlight.transcript) return;
+  if (!room.spotlight || !room.spotlight.transcript) return;
   reports.unshift({
-    id: spotlight.id,
-    eventId: spotlight.eventId || currentEventId(),
-    participantName: spotlight.participantName,
-    projectTitle: spotlight.projectTitle,
-    kind: spotlight.kind,
-    transcript: cleanText(spotlight.transcript, 6000),
-    insights: spotlight.insights || null,
-    startedAt: spotlight.startedAt,
+    id: room.spotlight.id,
+    eventId: room.spotlight.eventId || currentEventId(),
+    participantName: room.spotlight.participantName,
+    projectTitle: room.spotlight.projectTitle,
+    kind: room.spotlight.kind,
+    transcript: cleanText(room.spotlight.transcript, 6000),
+    insights: room.spotlight.insights || null,
+    startedAt: room.spotlight.startedAt,
     endedAt: Date.now(),
   });
   reports.length = Math.min(reports.length, REPORT_LIMIT);
@@ -1024,18 +779,18 @@ const server = http.createServer(async (req, res) => {
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
     markAttendance(id);
-    visuals = normalizeVisuals({
-      ...visuals,
-      theme: body.theme ?? visuals.theme,
-      energy: body.energy ?? visuals.energy,
-      complexity: body.complexity ?? visuals.complexity,
-      hue: body.hue ?? visuals.hue,
+    room.visuals = normalizeVisuals({
+      ...room.visuals,
+      theme: body.theme ?? room.visuals.theme,
+      energy: body.energy ?? room.visuals.energy,
+      complexity: body.complexity ?? room.visuals.complexity,
+      hue: body.hue ?? room.visuals.hue,
       editedBy: identityDisplayName(id),
       editedAt: Date.now(),
     });
     savePersistentState();
     broadcast();
-    return send(res, 200, { visuals });
+    return send(res, 200, { visuals: room.visuals });
   }
 
   // guest: phone motion triggers a short visual response, rate-limited per person
@@ -1049,7 +804,7 @@ const server = http.createServer(async (req, res) => {
     const lastAt = gestureTimes.get(body.token) || 0;
     if (Date.now() - lastAt < 900) return send(res, 429, { error: 'shake too frequent' });
     gestureTimes.set(body.token, Date.now());
-    visualEvent = {
+    room.visualEvent = {
       id: crypto.randomBytes(4).toString('hex'),
       type: 'shake',
       intensity: clamp(body.intensity, 0, 1, 0.5),
@@ -1058,7 +813,7 @@ const server = http.createServer(async (req, res) => {
       at: Date.now(),
     };
     broadcast();
-    return send(res, 200, { ok: true, visualEvent });
+    return send(res, 200, { ok: true, visualEvent: room.visualEvent });
   }
 
   // admin: set the room's current show phase
@@ -1066,10 +821,10 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const requested = String(body.mode || '');
     if (!SHOW_MODES.has(requested)) return send(res, 400, { error: 'unknown mode' });
-    mode = requested;
+    room.mode = requested;
     savePersistentState();
     broadcast();
-    return send(res, 200, { mode });
+    return send(res, 200, { mode: room.mode });
   }
 
   // timer controls
@@ -1121,7 +876,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 409, { error: 'participant has not consented to live transcription/display' });
     }
     const kind = body.kind === 'progress' ? 'progress' : 'introduction';
-    spotlight = {
+    room.spotlight = {
       id: crypto.randomBytes(5).toString('hex'),
       eventId: currentEventId(),
       active: true,
@@ -1141,9 +896,9 @@ const server = http.createServer(async (req, res) => {
 
   if (method === 'POST' && p === '/api/spotlight/transcript') {
     const body = await readBody(req);
-    if (!spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
-    spotlight = {
-      ...spotlight,
+    if (!room.spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
+    room.spotlight = {
+      ...room.spotlight,
       transcript: cleanText(body.transcript ?? body.text, 6000),
       isFinal: body.isFinal === true,
       status: body.isFinal === true ? 'captured' : 'listening',
@@ -1153,8 +908,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === 'POST' && p === '/api/spotlight/insights') {
-    if (!spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
-    const id = identities.get(spotlight.participantToken);
+    if (!room.spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
+    const id = identities.get(room.spotlight.participantToken);
     if (id?.consentResearch !== true) {
       return send(res, 409, { error: 'participant has not consented to external research and analysis' });
     }
@@ -1162,8 +917,8 @@ const server = http.createServer(async (req, res) => {
       const insights = await developSpotlightInsights();
       return send(res, 200, { insights, spotlight: hostSpotlight() });
     } catch (err) {
-      if (spotlight) {
-        spotlight = { ...spotlight, status: 'research-failed' };
+      if (room.spotlight) {
+        room.spotlight = { ...room.spotlight, status: 'research-failed' };
         broadcast();
       }
       return send(res, 502, { error: err.message });
@@ -1172,7 +927,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === 'POST' && p === '/api/spotlight/end') {
     archiveSpotlight();
-    spotlight = null;
+    room.spotlight = null;
     broadcast();
     return send(res, 200, { spotlight: null });
   }
@@ -1209,7 +964,7 @@ const server = http.createServer(async (req, res) => {
     sortQueue();
     savePersistentState();
     broadcast();
-    if (!nowPlaying) playNext();
+    if (!room.nowPlaying) playNext();
     return send(res, 200, { ok: true, queued: publicTrack(entry) });
   }
 
@@ -1289,6 +1044,17 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404); res.end('not found');
 });
+
+// --- composition root: wire state.js's late-bound cross-module hooks ---
+// state.js calls these indirectly to avoid a static require cycle with sse-hub/
+// mpv (broadcast/playNext) and the event-session globals (still in this file).
+// Wire them now that every dependency is defined, BEFORE any boot call that may
+// reach through a hook (armTimerTimeout/playNext both broadcast).
+state.hooks.broadcast = broadcast;
+state.hooks.playNext = playNext;
+state.hooks.currentEventId = currentEventId;
+state.hooks.getEvent = () => event;
+state.hooks.getEventsArchive = () => eventsArchive;
 
 sortQueue();
 armTimerTimeout();
