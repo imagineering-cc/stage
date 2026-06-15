@@ -1,0 +1,81 @@
+# Stage — local network secrets (TEMPLATE)
+
+> Copy this file to `ops/network.local.md` and fill in your venue's real
+> values. The real file is **gitignored** so credentials and concrete addresses
+> never reach the public repo; this `.example` is committed as the onboarding
+> guide. The reusable *architecture* and recipe live in the public `CLAUDE.md`
+> "Network setup" section — read that first; this file is only the per-venue
+> blanks to fill in.
+>
+>     cp ops/network.local.md.example ops/network.local.md
+>     # then edit ops/network.local.md with your real values
+
+## Pi access
+
+- Pi hostname: `raspberrypi`
+- Pi Tailscale IP: `100.x.y.z`            # from `tailscale ip -4` on the Pi
+- Admin/dev access: `ssh <user>@100.x.y.z`
+- Admin page: `http://100.x.y.z:3000/admin` (from any device on your tailnet)
+- Public Caddy proxy target: `100.x.y.z:3000`
+
+## Guest WiFi (OpenWrt AP on the router, e.g. Linksys WRT1900ACS)
+
+- SSID: `<your-guest-ssid>`
+- Password: `<your-guest-wifi-password>`
+
+## Upstream room WiFi (the venue's internet, used by the Pi + OpenWrt wwan)
+
+- SSID: `<venue-wifi-ssid>`
+- Password: `<venue-wifi-password>`
+
+## Verified addresses (record yours once, dated, from the Pi over Tailscale)
+
+- Pi Tailscale IP: `100.x.y.z`
+- Pi room-WiFi IP: `<a.b.c.d/nn>` on `wlan0`        # `ip -4 addr show wlan0`
+- Pi guest-LAN IP: `192.168.1.NNN/24` on `eth0`     # static OpenWrt DHCP lease
+- OpenWrt LAN config: `network.lan.ipaddr='192.168.1.1/24'`
+- OpenWrt DHCP: start `100`, limit `150`, lease time `12h`
+- OpenWrt `wwan`: `<a.b.c.d/nn>` via room WiFi, gateway/DNS `<router-ip>`
+
+## Observed guest-network DHCP behavior (a laptop joined to the guest AP)
+
+- Client IP example: `192.168.1.NNN`
+- Guest subnet: `192.168.1.0/24`
+- Router/DHCP server: `192.168.1.1`
+- DNS handed out by DHCP: `192.168.1.1`
+- DHCP search domain: `lan`
+- Pi guest-network IP: `192.168.1.NNN` via static OpenWrt DHCP lease
+- Pi DHCP hostname resolves as `raspberrypi.lan` via OpenWrt dnsmasq
+- `dreamfinder.lan` resolves to the Pi's guest-LAN IP via OpenWrt dnsmasq
+
+---
+
+## Server config (systemd drop-in, NOT this file)
+
+Network secrets live here; the Stage *server*'s environment variables live in a
+private systemd drop-in so they're injected into `stage-server.service` without
+being committed. Create one with:
+
+    systemctl --user edit stage-server.service
+
+and add (only the ones you need):
+
+    [Service]
+    # Public join URL the QR code points at. Defaults to
+    # https://imagineering.cc/stage; override per venue.
+    Environment=STAGE_JOIN_URL=https://your-domain.example/stage
+
+    # Optional: Dreamfinder-authored facilitation questions via the OpenAI
+    # Responses API. WITHOUT a model key the room labels analysis as
+    # source-backed facilitation rather than generated commentary.
+    Environment=STAGE_OPENAI_API_KEY=sk-...
+    Environment=STAGE_OPENAI_MODEL=gpt-5.4-mini
+
+    # Optional: raise the GitHub API rate limit for evidence search over
+    # consenting participants' public repos. A read-only/no-scope token is fine.
+    Environment=STAGE_GITHUB_TOKEN=ghp_...
+
+Operational toggles also read from the environment (see `server.js`):
+
+    # STAGE_NO_AUDIO=1     run without mpv (CI / a Pi with no audio sink)
+    # STAGE_STATE_FILE=... override the persisted-state path (default stage-state.json)
