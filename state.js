@@ -29,6 +29,7 @@
 
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 
 const {
   STATE_FILE,
@@ -69,7 +70,17 @@ function loadPersistentState() {
     const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     return raw && typeof raw === 'object' ? raw : {};
   } catch (err) {
-    if (err.code !== 'ENOENT') console.error('state load failed', err.message);
+    if (err.code === 'ENOENT') return {}; // first boot: silent, expected
+    // Parse error or other read failure. Preserve the bad file so the next
+    // save (atomic rename) cannot destroy the only recoverable copy, then boot
+    // empty — an empty room beats a bricked appliance mid-meetup.
+    const quarantine = `${STATE_FILE}.corrupt-${Date.now()}-${process.pid}`;
+    try {
+      fs.renameSync(STATE_FILE, quarantine);
+      console.error(`[STATE CORRUPTION] ${STATE_FILE} was unreadable (${err.message}); preserved at ${quarantine} for recovery. Booting with empty state.`);
+    } catch (renameErr) {
+      console.error(`[STATE CORRUPTION] ${STATE_FILE} was unreadable (${err.message}) AND could not be quarantined (${renameErr.message}). Booting with empty state; the original file may still be at ${STATE_FILE}.`);
+    }
     return {};
   }
 }
@@ -141,6 +152,61 @@ function normalizeVisuals(value) {
   };
 }
 
+// Pre-write shape gate. Atomic != valid: an atomic rename will durably persist
+// in-memory garbage just as faithfully as good data. This validates ONLY the
+// invariants the running code actually guarantees (verified against
+// createIdentity/startTimer/normalizeEvent/normalizeVisuals shapes) — NOT
+// over-specific per-record fields that legitimate saves don't all carry. On a
+// violation it throws LOUDLY (same spirit as the hooksWired guard) so garbage is
+// rejected rather than written over the last good copy.
+function validateStateShape(d) {
+  const fail = (m) => { throw new Error(`[STATE VALIDATION] refusing to persist: ${m}`); };
+  if (!d || typeof d !== 'object') fail('root is not an object');
+
+  if (!Array.isArray(d.identities)) fail('identities is not an array');
+  d.identities.forEach((it, i) => {
+    if (!Array.isArray(it) || it.length !== 2) fail(`identities[${i}] is not a [token, identity] pair`);
+    if (typeof it[0] !== 'string') fail(`identities[${i}][0] token is not a string`);
+    if (!it[1] || typeof it[1] !== 'object') fail(`identities[${i}][1] is not an object`);
+  });
+
+  for (const k of ['playHistory', 'queue']) {
+    if (!Array.isArray(d[k])) fail(`${k} is not an array`);
+    d[k].forEach((t, i) => {
+      if (!t || typeof t !== 'object') fail(`${k}[${i}] is not an object`);
+      if (typeof t.id !== 'string') fail(`${k}[${i}].id is not a string`);
+    });
+  }
+
+  if (!Array.isArray(d.reports)) fail('reports is not an array');
+  d.reports.forEach((r, i) => { if (!r || typeof r !== 'object') fail(`reports[${i}] is not an object`); });
+
+  if (!Array.isArray(d.eventsArchive)) fail('eventsArchive is not an array');
+  d.eventsArchive.forEach((e, i) => { if (!e || typeof e !== 'object') fail(`eventsArchive[${i}] is not an object`); });
+
+  if (!d.lastPlayedRequesterByVotes || typeof d.lastPlayedRequesterByVotes !== 'object' || Array.isArray(d.lastPlayedRequesterByVotes)) fail('lastPlayedRequesterByVotes is not an object');
+
+  if (d.timer !== null) {
+    if (typeof d.timer !== 'object' || Array.isArray(d.timer)) fail('timer is not null or an object');
+    if (typeof d.timer.id !== 'string') fail('timer.id is not a string');
+    if (typeof d.timer.status !== 'string') fail('timer.status is not a string');
+    if (typeof d.timer.endsAt !== 'number') fail('timer.endsAt is not a number');
+  }
+
+  if (d.event !== null && (typeof d.event !== 'object' || Array.isArray(d.event))) fail('event is not null or an object');
+  if (d.event && typeof d.event.id !== 'string') fail('event.id is not a string');
+
+  if (!SHOW_MODES.has(d.mode)) fail(`mode "${d.mode}" not in SHOW_MODES`);
+
+  if (!d.visuals || typeof d.visuals !== 'object') fail('visuals is not an object');
+  const v = d.visuals;
+  if (!VISUAL_THEMES.has(v.theme)) fail(`visuals.theme "${v.theme}" not in VISUAL_THEMES`);
+  if (typeof v.energy !== 'number' || v.energy < 0 || v.energy > 1) fail('visuals.energy not a number in [0,1]');
+  if (typeof v.complexity !== 'number' || v.complexity < 0 || v.complexity > 1) fail('visuals.complexity not a number in [0,1]');
+  if (typeof v.hue !== 'number' || v.hue < 0 || v.hue > 360) fail('visuals.hue not a number in [0,360]');
+  if (v.editedAt !== null && typeof v.editedAt !== 'number') fail('visuals.editedAt not null or a number');
+}
+
 function savePersistentState() {
   // Fail loud, not silent: persisting before hooks are wired would write
   // event:null over a real event (see wireHooks above).
@@ -148,7 +214,10 @@ function savePersistentState() {
     throw new Error('savePersistentState() before state.wireHooks(): event/eventsArchive would persist as null. Wire hooks in the composition root before any save.');
   }
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
-  const data = JSON.stringify({
+  // Build the object literal first so the shape gate runs on it BEFORE stringify
+  // and BEFORE the write try/catch — a validation throw must propagate like the
+  // hooksWired guard, never be swallowed by the unlink-and-continue catch below.
+  const data = {
     identities: Array.from(identities.entries()),
     playHistory,
     queue,
@@ -159,13 +228,27 @@ function savePersistentState() {
     reports,
     event: hooks.getEvent(),
     eventsArchive: hooks.getEventsArchive(),
-  }, null, 2);
+  };
+  validateStateShape(data); // throws loudly on garbage; deliberately NOT in the try below
+  const json = JSON.stringify(data, null, 2);
   try {
-    fs.writeFileSync(tmp, data, { mode: 0o600 });
+    fs.writeFileSync(tmp, json, { mode: 0o600 });
+    // fsync the tmp file before rename: closes the Pi power-cut window where the
+    // rename's metadata lands but the data hasn't flushed -> a zero-length file.
+    const fd = fs.openSync(tmp, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(tmp, STATE_FILE);
+    // Best-effort dir fsync makes the rename metadata itself durable. Some
+    // platforms reject opening a directory fd, so this is isolated — degrading
+    // to file-only durability beats failing the save (and keeps CI portable).
+    try {
+      const dirFd = fs.openSync(path.dirname(STATE_FILE), 'r');
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    } catch (_) { /* file+inode fsync already gives the power-cut safety bar */ }
   } catch (err) {
     console.error('state save failed', err.message);
     try { fs.unlinkSync(tmp); } catch (_) {}
+    throw err; // propagate — a failed save must not silently look successful
   }
 }
 
@@ -384,6 +467,7 @@ module.exports = {
   // persistence
   loadPersistentState,
   savePersistentState,
+  validateStateShape,
   // identity + helpers
   createIdentity,
   clamp,
