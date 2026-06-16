@@ -65,24 +65,45 @@ function wireHooks(impl) {
   hooksWired = true;
 }
 
-function loadPersistentState() {
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+// Preserve a corrupt state file so the next save (atomic rename) cannot destroy
+// the only recoverable copy, then let the caller boot empty — an empty room
+// beats a bricked appliance mid-meetup. Timestamp+pid suffix avoids collisions
+// under rapid restart loops.
+function quarantineCorruptFile(reason) {
+  const quarantine = `${STATE_FILE}.corrupt-${Date.now()}-${process.pid}`;
   try {
-    const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    return raw && typeof raw === 'object' ? raw : {};
+    fs.renameSync(STATE_FILE, quarantine);
+    console.error(`[STATE CORRUPTION] ${STATE_FILE} ${reason}; preserved at ${quarantine} for recovery. Booting with empty state.`);
+  } catch (renameErr) {
+    console.error(`[STATE CORRUPTION] ${STATE_FILE} ${reason} AND could not be quarantined (${renameErr.message}). Booting with empty state; the original file may still be at ${STATE_FILE}.`);
+  }
+}
+
+function loadPersistentState() {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   } catch (err) {
     if (err.code === 'ENOENT') return {}; // first boot: silent, expected
-    // Parse error or other read failure. Preserve the bad file so the next
-    // save (atomic rename) cannot destroy the only recoverable copy, then boot
-    // empty — an empty room beats a bricked appliance mid-meetup.
-    const quarantine = `${STATE_FILE}.corrupt-${Date.now()}-${process.pid}`;
-    try {
-      fs.renameSync(STATE_FILE, quarantine);
-      console.error(`[STATE CORRUPTION] ${STATE_FILE} was unreadable (${err.message}); preserved at ${quarantine} for recovery. Booting with empty state.`);
-    } catch (renameErr) {
-      console.error(`[STATE CORRUPTION] ${STATE_FILE} was unreadable (${err.message}) AND could not be quarantined (${renameErr.message}). Booting with empty state; the original file may still be at ${STATE_FILE}.`);
-    }
+    quarantineCorruptFile(`was unreadable (${err.message})`);
     return {};
   }
+  // Parsed, but the persisted root must be a PLAIN object. A JSON array or a
+  // bare primitive (string/number/null) is corruption too: the old loose
+  // `typeof === 'object'` test let an array straight through, and a primitive's
+  // original file was left on disk to be silently destroyed by the next save.
+  // Quarantine the same way before booting empty (the valid-JSON-wrong-type gap
+  // the adversarial review surfaced).
+  if (!isPlainObject(raw)) {
+    const kind = Array.isArray(raw) ? 'array' : raw === null ? 'null' : typeof raw;
+    quarantineCorruptFile(`parsed to a non-object (${kind})`);
+    return {};
+  }
+  return raw;
 }
 
 const savedState = loadPersistentState();
@@ -109,7 +130,7 @@ const gestureTimes = new Map();
 // Reassigned scalars live on this single holder (see header note B).
 const room = {
   nowPlaying: null,           // { ...trackEntry } | null
-  timer: savedState.timer && typeof savedState.timer === 'object' ? savedState.timer : null,
+  timer: isValidTimer(savedState.timer) ? savedState.timer : null,
   mode: SHOW_MODES.has(savedState.mode) ? savedState.mode : 'free-jukebox',
   announcement: null,         // { id, title, message, detail, createdAt, expiresAt, color } | null
   visuals: normalizeVisuals(savedState.visuals),
@@ -152,6 +173,19 @@ function normalizeVisuals(value) {
   };
 }
 
+// A persisted timer is only well-formed if it carries the fields the running
+// code (and the write-side gate) require. Load-side hydration and the validator
+// share THIS predicate so the two can never disagree: anything the gate would
+// reject on write is loaded as null on read, instead of as garbage that would
+// crash the first guest-triggered save (the load/write asymmetry the adversarial
+// review proved could crash-loop the appliance).
+function isValidTimer(t) {
+  return isPlainObject(t)
+    && typeof t.id === 'string'
+    && typeof t.status === 'string'
+    && Number.isFinite(t.endsAt);
+}
+
 // Pre-write shape gate. Atomic != valid: an atomic rename will durably persist
 // in-memory garbage just as faithfully as good data. This validates ONLY the
 // invariants the running code actually guarantees (verified against
@@ -190,7 +224,9 @@ function validateStateShape(d) {
     if (typeof d.timer !== 'object' || Array.isArray(d.timer)) fail('timer is not null or an object');
     if (typeof d.timer.id !== 'string') fail('timer.id is not a string');
     if (typeof d.timer.status !== 'string') fail('timer.status is not a string');
-    if (typeof d.timer.endsAt !== 'number') fail('timer.endsAt is not a number');
+    // Number.isFinite, not typeof: typeof NaN/Infinity === 'number' would slip a
+    // non-finite endsAt past the gate and re-corrupt on the next reload.
+    if (!Number.isFinite(d.timer.endsAt)) fail('timer.endsAt is not a finite number');
   }
 
   if (d.event !== null && (typeof d.event !== 'object' || Array.isArray(d.event))) fail('event is not null or an object');
@@ -201,10 +237,12 @@ function validateStateShape(d) {
   if (!d.visuals || typeof d.visuals !== 'object') fail('visuals is not an object');
   const v = d.visuals;
   if (!VISUAL_THEMES.has(v.theme)) fail(`visuals.theme "${v.theme}" not in VISUAL_THEMES`);
-  if (typeof v.energy !== 'number' || v.energy < 0 || v.energy > 1) fail('visuals.energy not a number in [0,1]');
-  if (typeof v.complexity !== 'number' || v.complexity < 0 || v.complexity > 1) fail('visuals.complexity not a number in [0,1]');
-  if (typeof v.hue !== 'number' || v.hue < 0 || v.hue > 360) fail('visuals.hue not a number in [0,360]');
-  if (v.editedAt !== null && typeof v.editedAt !== 'number') fail('visuals.editedAt not null or a number');
+  // Number.isFinite, not typeof: NaN/Infinity are typeof 'number' and pass < / >
+  // comparisons as false, so a typeof check would let them through the gate.
+  if (!Number.isFinite(v.energy) || v.energy < 0 || v.energy > 1) fail('visuals.energy not a finite number in [0,1]');
+  if (!Number.isFinite(v.complexity) || v.complexity < 0 || v.complexity > 1) fail('visuals.complexity not a finite number in [0,1]');
+  if (!Number.isFinite(v.hue) || v.hue < 0 || v.hue > 360) fail('visuals.hue not a finite number in [0,360]');
+  if (v.editedAt !== null && !Number.isFinite(v.editedAt)) fail('visuals.editedAt not null or a finite number');
 }
 
 function savePersistentState() {
@@ -229,7 +267,22 @@ function savePersistentState() {
     event: hooks.getEvent(),
     eventsArchive: hooks.getEventsArchive(),
   };
-  validateStateShape(data); // throws loudly on garbage; deliberately NOT in the try below
+  // Shape gate. A violation means in-memory state is corrupt; the validator's
+  // JOB is to keep garbage OFF disk — achieve that by SKIPPING this write and
+  // logging loudly, NOT by throwing. The throw is uncaught in request handlers
+  // (createIdentity -> route -> process crash); a malformed-but-parseable
+  // persisted field would otherwise crash-loop the room on the first /api/join.
+  // The last good on-disk copy is left intact. KNOWN TRADEOFF: in-memory changes
+  // since the last good save won't survive a restart until the bad state is
+  // corrected — the loud log surfaces it. A stale/empty room beats a crash-loop.
+  // (The hooksWired guard above still throws: that's a boot-wiring/deploy bug
+  // that cannot occur at request time, so crashing loudly is correct there.)
+  try {
+    validateStateShape(data);
+  } catch (err) {
+    console.error(`state save skipped: ${err.message}`);
+    return;
+  }
   const json = JSON.stringify(data, null, 2);
   try {
     fs.writeFileSync(tmp, json, { mode: 0o600 });

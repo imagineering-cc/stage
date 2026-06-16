@@ -569,6 +569,11 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
     ['timer', (d) => { d.timer = {}; }, 'timer'],
     ['lastPlayedRequesterByVotes', (d) => { d.lastPlayedRequesterByVotes = []; }, 'lastPlayedRequesterByVotes'],
     ['eventsArchive', (d) => { d.eventsArchive = [123]; }, 'eventsArchive'],
+    // NaN/Infinity are typeof 'number' — the gate must use Number.isFinite or
+    // these slip through and re-corrupt on the next reload (adversarial finding).
+    ['timer.endsAt NaN', (d) => { d.timer = { id: 't', status: 'running', endsAt: NaN }; }, 'endsAt'],
+    ['visuals.energy NaN', (d) => { d.visuals = { ...d.visuals, energy: NaN }; }, 'energy'],
+    ['visuals.hue Infinity', (d) => { d.visuals = { ...d.visuals, hue: Infinity }; }, 'hue'],
   ];
   for (const [label, mutate, field] of cases) {
     const d = goodBase();
@@ -581,4 +586,95 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
   }
 
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// 12. valid-JSON-but-WRONG-TYPE on load is quarantined too. A state file that
+//     PARSES to a JSON array (or bare primitive) is corruption: the old loose
+//     `typeof === 'object'` test let an array straight through, and its original
+//     bytes were destroyed by the first save. This is the MAJOR adversarial
+//     finding's regression lock — quarantine must fire on parse-success-wrong-
+//     shape, not only on parse-error.
+// ---------------------------------------------------------------------------
+test('corruption: a valid-JSON array (wrong type) is quarantined, not silently destroyed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-wrongtype-'));
+  const sf = path.join(dir, 'state.json');
+  const badBlob = JSON.stringify([1, 2, 3, 'important recoverable data']); // parses, but is an array
+  fs.writeFileSync(sf, badBlob);
+
+  let boot;
+  try {
+    boot = await bootOnce(sf);
+
+    const sidecars = fs.readdirSync(dir).filter((f) => f.startsWith('state.json.corrupt-'));
+    assert.equal(sidecars.length, 1, 'a wrong-type (array) file is quarantined to exactly one sidecar');
+    const sidecarPath = path.join(dir, sidecars[0]);
+    assert.equal(fs.readFileSync(sidecarPath, 'utf8'), badBlob, 'sidecar holds the original array bytes byte-for-byte');
+    assert.ok(boot.stderr().includes('[STATE CORRUPTION]'), 'wrong-type corruption is logged loudly');
+
+    // First post-boot save must not destroy the preserved copy.
+    const base = `http://127.0.0.1:${boot.port}`;
+    await fetch(base + '/api/event/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Recover' }),
+    });
+    const joined = await fetch(base + '/api/join', { method: 'POST' });
+    assert.equal(joined.status, 200, 'a guest can join the recovered room');
+    const recovered = JSON.parse(fs.readFileSync(sf, 'utf8'));
+    assert.ok(!Array.isArray(recovered) && typeof recovered === 'object', 'first save wrote a fresh OBJECT-shaped state');
+    assert.equal(fs.readFileSync(sidecarPath, 'utf8'), badBlob, 'the first save did NOT destroy the sidecar');
+  } finally {
+    if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 13. a malformed-but-PARSEABLE timer must NOT crash-loop the appliance. The
+//     adversarial BLOCKER: load-side hydration accepted any object as the timer,
+//     the write-side gate rejected it, and the gate threw UNCAUGHT out of a route
+//     handler -> whole-process crash on the first /api/join -> reboot -> same file
+//     -> crash again, forever. Reproduces the exact scenario (open event + a
+//     timer:{legacy:true}) and asserts the room stays alive and serving.
+// ---------------------------------------------------------------------------
+test('resilience: a malformed persisted timer does not crash the room on first join', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-badtimer-'));
+  const sf = path.join(dir, 'state.json');
+  // Parses fine; event hydrates as OPEN (so /api/join is allowed); the timer is
+  // a shape the write-side gate would reject.
+  fs.writeFileSync(sf, JSON.stringify({
+    identities: [],
+    playHistory: [],
+    queue: [],
+    reports: [],
+    eventsArchive: [],
+    lastPlayedRequesterByVotes: { '0': null },
+    timer: { legacy: true }, // <-- the poison: object but no id/status/endsAt
+    event: { id: 'evt-badtimer', title: 'Bad Timer', status: 'open', openedAt: 1, closedAt: null },
+    mode: 'free-jukebox',
+    visuals: {},
+  }));
+
+  let boot;
+  try {
+    boot = await bootOnce(sf);
+    const base = `http://127.0.0.1:${boot.port}`;
+
+    // The exact crash trigger from the finding: a guest join drives createIdentity
+    // -> savePersistentState. Before the fix this threw uncaught and killed the
+    // process; now the malformed timer is loaded as null, so the save is clean.
+    const joined = await fetch(base + '/api/join', { method: 'POST' });
+    assert.equal(joined.status, 200, 'join succeeds — the malformed timer did not crash the save');
+
+    // The process is still alive and serving a SECOND request (a crash would make
+    // this fetch reject / connection-refuse).
+    const still = await fetch(base + '/api/config');
+    assert.ok(still.ok, 'server is still up and serving after the join');
+
+    // The poison timer was dropped on load, so persisted state carries timer:null.
+    const persisted = JSON.parse(fs.readFileSync(sf, 'utf8'));
+    assert.equal(persisted.timer, null, 'malformed timer was dropped to null, not persisted forward');
+  } finally {
+    if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
