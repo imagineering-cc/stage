@@ -88,6 +88,40 @@ function quarantineCorruptFile(reason) {
   }
 }
 
+// Remove ORPHAN per-pid tmp files left by an interrupted save. savePersistentState
+// writes `${STATE_FILE}.${pid}.tmp`, fsyncs, then atomically renames it over
+// STATE_FILE; on the normal error path it unlinks the tmp. But a power-cut or
+// SIGKILL in the fsync->rename window strands the tmp forever — harmless (load
+// only ever reads STATE_FILE, never a .tmp) but it accretes. Sweep them at boot.
+//
+// Matches ONLY `<basename>.<digits>.tmp` (the per-pid naming). The `\d+` anchor
+// is deliberate: it can NEVER match a `.corrupt-<ts>-<pid>` quarantine sidecar
+// (those carry the `corrupt-` prefix and no trailing `.tmp`), which is forensics
+// we must retain. The CURRENT process's own tmp, if any, is an in-flight write —
+// skipped by pid. Fully defensive: any failure (unreadable dir, racing unlink)
+// is swallowed so a sweep can NEVER block boot.
+function sweepOrphanTmpFiles() {
+  try {
+    const dir = path.dirname(STATE_FILE);
+    const base = path.basename(STATE_FILE);
+    // Escape regex metacharacters in the basename so a literal '.' in the file
+    // name matches a '.', not any character (defensive; basenames are tame here).
+    const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tmpPattern = new RegExp(`^${escaped}\\.(\\d+)\\.tmp$`);
+    let removed = 0;
+    for (const name of fs.readdirSync(dir)) {
+      const m = tmpPattern.exec(name);
+      if (!m) continue;
+      if (Number(m[1]) === process.pid) continue; // our own in-flight write
+      try {
+        fs.unlinkSync(path.join(dir, name));
+        removed += 1;
+      } catch (_) { /* racing unlink / gone already — fine */ }
+    }
+    if (removed > 0) console.log(`[STATE] swept ${removed} orphan tmp file(s)`);
+  } catch (_) { /* a sweep failure must never block boot */ }
+}
+
 function loadPersistentState() {
   let raw;
   try {
@@ -112,6 +146,11 @@ function loadPersistentState() {
 }
 
 const savedState = loadPersistentState();
+// Sweep stale orphan tmp files at module load — the same boot seam as the load
+// above, so it runs exactly once, AFTER STATE_FILE is known, and inside state.js
+// (the module that owns the tmp naming) rather than bolted onto the composition
+// root. Deliberately AFTER loadPersistentState so it never races the real read.
+sweepOrphanTmpFiles();
 const savedIdentities = Array.isArray(savedState.identities)
   ? savedState.identities.filter(item => Array.isArray(item) && item.length === 2)
   : [];
@@ -658,6 +697,7 @@ module.exports = {
   wireHooks,
   // persistence
   loadPersistentState,
+  sweepOrphanTmpFiles,
   savePersistentState,
   validateStateShape,
   isValidSprintSession,
