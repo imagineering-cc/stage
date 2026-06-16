@@ -25,6 +25,8 @@ const {
   publicTrack,
   publicQueue,
   hostSpotlight,
+  shareQueueEntry,
+  pruneShareEntry,
   sortQueue,
   startTimer,
   clearTimer,
@@ -78,6 +80,47 @@ function requireOpenEvent(res) {
   if (isEventOpen()) return true;
   send(res, 403, { error: 'No event is running right now.', eventClosed: true });
   return false;
+}
+
+// THE TRUST BOUNDARY (M2). The single source of truth for "who may speak" is
+// room.spotlight.participantToken (set by admit, cleared by every terminal
+// transition). This rule is re-derived from room.spotlight on EVERY transcript/
+// correct request — it never trusts prior client state, never caches. Returns the
+// token on success, or null AFTER having already sent the rejection (the caller
+// bails on null and only mutates room.spotlight past it). The bypass cases are
+// enumerated in ENGINE.md / the design; this one rule rejects all of them:
+//   (E) missing/garbage or never-minted token -> 401
+//   (F) no live spotlight (none admitted, or already finished/stopped) -> 409
+//   (D) spotlight belongs to a different/closed event -> 409
+//   (A/B/C) a live spotlight but not THIS token's turn -> 403
+function gateAdmittedPresenter(res, body) {
+  const token = body.token;
+  if (typeof token !== 'string' || token.length === 0) {
+    send(res, 401, { error: 'missing or invalid token' }); return null;
+  }
+  if (!identities.has(token)) {
+    send(res, 401, { error: 'unknown token' }); return null;
+  }
+  if (!room.spotlight || room.spotlight.active !== true) {
+    send(res, 409, { error: 'no active spotlight' }); return null;
+  }
+  // currentEventId() is null when the event is closed; spotlight.eventId is a
+  // non-null string, so this also covers the close-mid-presentation case.
+  if (room.spotlight.eventId !== currentEventId()) {
+    send(res, 409, { error: 'event has changed; presentation ended' }); return null;
+  }
+  if (room.spotlight.participantToken !== token) {
+    send(res, 403, { error: 'you are not the admitted presenter' }); return null;
+  }
+  return token;
+}
+
+// Clear the live spotlight IFF it belongs to `token` (defensive: a terminal
+// transition for a stale token must never clear a NEWER presenter's spotlight).
+function clearSpotlightFor(token) {
+  if (room.spotlight && room.spotlight.participantToken === token) {
+    room.spotlight = null;
+  }
 }
 
 async function requestHandler(req, res) {
@@ -364,15 +407,45 @@ async function requestHandler(req, res) {
     return send(res, 200, { spotlight: hostSpotlight() });
   }
 
+  // Stream interim speech text. PUBLIC guest route (the admitted presenter's own
+  // phone POSTs here), but per-token gated: ONLY the admitted presenter's token
+  // is accepted — every other token is rejected by gateAdmittedPresenter before
+  // any mutation. The {token} in the body is no longer trusted as authorization.
   if (method === 'POST' && p === '/api/spotlight/transcript') {
     const body = await readBody(req);
-    if (!room.spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
+    const token = gateAdmittedPresenter(res, body);
+    if (!token) return;
     room.spotlight = {
       ...room.spotlight,
       transcript: cleanText(body.transcript ?? body.text, 6000),
       isFinal: body.isFinal === true,
       status: body.isFinal === true ? 'captured' : 'listening',
     };
+    broadcast();
+    return send(res, 200, { spotlight: hostSpotlight() });
+  }
+
+  // The CORRECTION step (M2). The admitted presenter submits their final,
+  // optionally-edited transcript. Same per-token gate as transcript; on success
+  // it writes the corrected final text and flips the entry to 'correcting' —
+  // which is the HARD precondition for /api/share/finish (the host cannot archive
+  // before the guest has confirmed). PUBLIC guest route.
+  if (method === 'POST' && p === '/api/spotlight/correct') {
+    const body = await readBody(req);
+    const token = gateAdmittedPresenter(res, body);
+    if (!token) return;
+    const entry = shareQueueEntry(token);
+    // Defensive: the gate already guarantees this is the presenter, but only an
+    // 'admitted' entry may advance to 'correcting' (a re-correct after finish is
+    // moot — the gate would already have 409'd on a cleared spotlight).
+    if (entry && entry.status === 'admitted') entry.status = 'correcting';
+    room.spotlight = {
+      ...room.spotlight,
+      transcript: cleanText(body.transcript ?? body.text, 6000),
+      isFinal: true,
+      status: 'corrected',
+    };
+    savePersistentState();
     broadcast();
     return send(res, 200, { spotlight: hostSpotlight() });
   }
@@ -400,6 +473,164 @@ async function requestHandler(req, res) {
     room.spotlight = null;
     broadcast();
     return send(res, 200, { spotlight: null });
+  }
+
+  // ===== Phone-led share queue (M2) =====
+  // PUBLIC guest actions: request / withdraw. HOST-only controls (admit / skip /
+  // stop / finish) are DELIBERATELY off the Caddy allow-list — that omission IS
+  // the host-only boundary, exactly like /api/skip, /api/mode, /api/timer/*.
+
+  // guest: request to present from their own phone (gated by an open event).
+  // Recording consent is a server gate (409), not just a hidden UI button.
+  if (method === 'POST' && p === '/api/share/request') {
+    if (!requireOpenEvent(res)) return;
+    const body = await readBody(req);
+    const id = identities.get(body.token);
+    if (!id) return send(res, 401, { error: 'unknown token' });
+    if (id.consentRecording !== true) {
+      return send(res, 409, { error: 'recording consent is required to present' });
+    }
+    markAttendance(id);
+    const kind = body.kind === 'progress' ? 'progress' : 'share';
+    const existing = shareQueueEntry(body.token);
+    if (existing) {
+      // Idempotent re-request: update the kind on a still-queued 'requested'
+      // entry; reject a duplicate while they're already live (admitted/correcting).
+      if (existing.status === 'requested') {
+        existing.kind = kind;
+        savePersistentState();
+        broadcast();
+        return send(res, 200, { id: existing.id, status: existing.status });
+      }
+      return send(res, 409, { error: 'you are already presenting' });
+    }
+    const entry = {
+      id: crypto.randomBytes(4).toString('hex'),
+      eventId: currentEventId(),
+      token: body.token,
+      name: identityDisplayName(id),    // snapshotted (display-only; not live-synced)
+      color: id.color,
+      kind,
+      projectTitle: cleanText(id.projectTitle, 100),
+      requestedAt: Date.now(),
+      admittedAt: null,
+      status: 'requested',
+    };
+    room.shareQueue.push(entry);
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { id: entry.id, status: entry.status });
+  }
+
+  // guest: withdraw from the queue (any non-terminal state). If they were the
+  // live presenter, their spotlight is cleared (NOT archived).
+  if (method === 'POST' && p === '/api/share/withdraw') {
+    if (!requireOpenEvent(res)) return;
+    const body = await readBody(req);
+    if (!identities.has(body.token)) return send(res, 401, { error: 'unknown token' });
+    const entry = shareQueueEntry(body.token);
+    if (!entry) return send(res, 404, { error: 'no share request to withdraw' });
+    clearSpotlightFor(body.token);          // clears iff this token was the live presenter
+    pruneShareEntry(body.token);            // terminal -> pruned (report lives in reports[])
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { ok: true });
+  }
+
+  // host: admit a requested presenter — STARTS their spotlight (reuses the exact
+  // shape /api/spotlight/start builds) and marks them the SOLE active presenter.
+  // HOST-ONLY (off the public proxy).
+  if (method === 'POST' && p === '/api/share/admit') {
+    const body = await readBody(req);
+    const id = identities.get(body.token);
+    if (!id) return send(res, 404, { error: 'unknown participant' });
+    if (id.consentRecording !== true) {
+      return send(res, 409, { error: 'participant has not consented to live transcription/display' });
+    }
+    // Single-active-presenter invariant: refuse a second spotlight.
+    if (room.spotlight?.active && room.spotlight.participantToken !== body.token) {
+      return send(res, 409, { error: 'another participant is already presenting' });
+    }
+    const entry = shareQueueEntry(body.token);
+    if (!entry) return send(res, 404, { error: 'no share request for this participant' });
+    if (entry.status !== 'requested') {
+      return send(res, 409, { error: 'participant is not waiting to present' });
+    }
+    const kind = entry.kind === 'progress' ? 'progress' : 'introduction';
+    room.spotlight = {
+      id: crypto.randomBytes(5).toString('hex'),
+      eventId: currentEventId(),
+      active: true,
+      participantToken: body.token,
+      participantName: identityDisplayName(id),
+      projectTitle: cleanText(id.projectTitle, 100),
+      kind,
+      transcript: '',
+      isFinal: false,
+      status: 'listening',
+      insights: null,
+      startedAt: Date.now(),
+    };
+    entry.status = 'admitted';
+    entry.admittedAt = Date.now();
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { spotlight: hostSpotlight() });
+  }
+
+  // host: skip a queued or live presenter (NOT archived). HOST-ONLY.
+  if (method === 'POST' && p === '/api/share/skip') {
+    const body = await readBody(req);
+    const entry = shareQueueEntry(body.token);
+    if (!entry) return send(res, 404, { error: 'no share request for this participant' });
+    clearSpotlightFor(body.token);
+    pruneShareEntry(body.token);
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { ok: true });
+  }
+
+  // host: stop the CURRENT live presenter (NOT archived). Global — no body token.
+  // HOST-ONLY.
+  if (method === 'POST' && p === '/api/share/stop') {
+    if (!room.spotlight?.active) return send(res, 409, { error: 'no active presenter' });
+    const token = room.spotlight.participantToken;
+    room.spotlight = null;
+    pruneShareEntry(token);
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { ok: true });
+  }
+
+  // host: FINISH the current presenter — runs research (if consented) and archives
+  // the report. HARD-gated on the correction step: the entry MUST be 'correcting'
+  // (the guest confirmed their transcript) or this 409s. HOST-ONLY.
+  if (method === 'POST' && p === '/api/share/finish') {
+    const body = await readBody(req);
+    const entry = shareQueueEntry(body.token);
+    if (!entry) return send(res, 404, { error: 'no share request for this participant' });
+    if (entry.status !== 'correcting') {
+      return send(res, 409, { error: 'presenter has not confirmed their transcript yet' });
+    }
+    if (!room.spotlight?.active || room.spotlight.participantToken !== body.token) {
+      return send(res, 409, { error: 'this participant is not the active presenter' });
+    }
+    // Research only runs with consentResearch; developSpotlightInsights itself
+    // re-checks, but gate here so finish stays a no-network archive when false.
+    const id = identities.get(body.token);
+    if (id?.consentResearch === true) {
+      try { await developSpotlightInsights(); } catch (err) {
+        // A research failure must NOT block the archive — the transcript is the
+        // deliverable. Log via the status the pipeline already set; archive anyway.
+        console.error('share finish: research failed, archiving transcript only:', err.message);
+      }
+    }
+    archiveSpotlight();
+    room.spotlight = null;
+    pruneShareEntry(body.token);
+    savePersistentState();
+    broadcast();
+    return send(res, 200, { ok: true });
   }
 
   // search

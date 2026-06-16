@@ -241,6 +241,18 @@ Verified from the Pi over Tailscale on 2026-05-23 (concrete addresses in
 - Public `/api/profile`, `/api/visuals`, and `/api/gesture` now proxy to the
   Pi (invalid-token probes return `401`); private `/api/show-events`,
   `/api/reports`, and `/api/spotlight/*` return `404` publicly
+- **M2 DEPLOYMENT (pending on the public Caddy host):** the phone-led share
+  queue adds FOUR public guest routes that must be ADDED to the Caddy allow-list
+  so a guest's own phone can drive its presentation:
+  `/api/share/request`, `/api/share/withdraw`, `/api/spotlight/transcript`, and
+  `/api/spotlight/correct`. The host controls `/api/share/admit`·`/skip`·`/stop`·
+  `/finish` are DELIBERATELY left OFF the allow-list — that omission IS the
+  host-only boundary (identical to `/api/skip`, `/api/timer/*`). Note this opens
+  `/api/spotlight/transcript`+`/correct` publicly for the first time; both are
+  per-token gated in-app (only the admitted presenter's token is accepted), so
+  the trust boundary is enforced TWICE: at the proxy (reachability) and in-app
+  (token gate). The token-bearing `shareQueue` lives only on `/api/show-events`,
+  which stays off the public route.
 - Generative room and mobile-control pages were rendered from the deployed
   build with Playwright at TV and phone viewports; both produced nonblank
   captures, and the Pi can reach OpenAlex scholarly search
@@ -314,9 +326,16 @@ stage/
 | GET    | `/api/event/archive`| Host-only past events; `?id=` returns that event's reports/history/attendees |
 | POST   | `/api/mode`         | Host-only room phase selection                |
 | POST   | `/api/spotlight/start` | Host begins a consented intro/progress turn |
-| POST   | `/api/spotlight/transcript` | Host streams browser speech recognition text |
+| POST   | `/api/spotlight/transcript` | Admitted presenter streams speech text (per-token gated) |
+| POST   | `/api/spotlight/correct` | Admitted presenter submits final edited transcript (per-token gated) |
 | POST   | `/api/spotlight/insights` | Host runs consented GitHub/arXiv/OpenAlex analysis |
 | POST   | `/api/spotlight/end` | Host archives and clears the spotlight        |
+| POST   | `/api/share/request` | Guest requests to present `{token, kind}`; requires recording consent |
+| POST   | `/api/share/withdraw` | Guest leaves the presentation queue `{token}` |
+| POST   | `/api/share/admit`  | Host admits a presenter `{token}` → starts their spotlight (host-only) |
+| POST   | `/api/share/skip`   | Host removes a queued/live presenter `{token}` (host-only)  |
+| POST   | `/api/share/stop`   | Host stops the live presenter, no archive (host-only)      |
+| POST   | `/api/share/finish` | Host finishes the live presenter: research + archive (host-only) |
 | POST   | `/api/timer/start`  | Body `{minutes}` or `{seconds}` → starts timer |
 | POST   | `/api/timer/clear`  | Clears active/ended timer                     |
 | GET    | `/api/sprint`       | Host-only current sprint session + full plan  |

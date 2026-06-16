@@ -72,6 +72,7 @@ and is a future step, tracked when a native *guest* frontend is built. The room
   "visuals":    Visuals,         // generative-background controls (always present)
   "visualEvent": VisualEvent | null, // transient gesture burst (~5s), or null
   "sprint":     Sprint | null,       // autonomous sprint session, or null when idle
+  "shareQueue": [ ShareEntry ],      // phone-led presentation queue; [] when empty
   "spotlight":  Spotlight | null     // SHOW STREAM ONLY — omitted on /api/events
 }
 ```
@@ -156,6 +157,31 @@ projection itself is public so guests see the room's structure.
 The participant's private token (`participantToken`) is present on the **show**
 stream's spotlight for host controls but is never on the public stream.
 
+**ShareEntry** (phone-led presentation queue; added protocol v1, additive)
+```jsonc
+// PUBLIC (on /api/events) — NEVER carries a token:
+{ "id": string,            // opaque per-request id (how a guest finds ITS OWN row)
+  "name": string,          // display label, snapshotted at request time
+  "color": string,
+  "kind": "share" | "progress",
+  "projectTitle": string,
+  "requestedAt": number,   // epoch ms
+  "status": "requested" | "admitted" | "correcting" }
+// SHOW (on /api/show-events) — the public fields PLUS:
+//   "token": string        // the presenter's private auth token (host controls)
+```
+`shareQueue` is present on **both** streams (`[]` when empty). Terminal entries
+(`finished`/`withdrawn`/`skipped`/`stopped`) are **pruned** and never appear on
+the wire — the archived report lives in `/api/reports`. The **public** projection
+**never** includes `token`; a guest locates its own entry by the opaque `id`
+returned from `POST /api/share/request`, reads that row's `status`, and computes
+its queue position (index among `requested` entries). At most ONE entry is ever
+`admitted`/`correcting` (the single-active-presenter invariant); that entry's
+`participantToken` is the spotlight gate (see below).
+
+This field is **additive**: a frontend that does not understand `shareQueue`
+ignores it; `ENGINE_PROTOCOL_VERSION` remains **1**.
+
 ### Closed sets
 
 - `mode` / `event.phase` ∈ `welcome`, `free-jukebox`, `sprint-build`,
@@ -192,15 +218,41 @@ treat `eventClosed: true` as "render the closed room", not as a hard error.
 | POST | `/api/upvote` | `{token, trackId}` | toggle one upvote (gated) |
 | POST | `/api/visuals` | `{token, theme?, energy?, complexity?, hue?}` | evolve the generative background (gated) |
 | POST | `/api/gesture` | `{token, type:"shake", intensity}` | transient visual burst (gated, rate-limited) |
+| POST | `/api/share/request` | `{token, kind:"share"\|"progress"}` | request to present from your phone (gated; **requires `consentRecording`** → 409 if not). Returns `{id, status}` — the opaque `id` is how you find your own row |
+| POST | `/api/share/withdraw` | `{token}` | leave the presentation queue (any non-terminal state) |
+| POST | `/api/spotlight/transcript` | `{token, transcript, isFinal}` | stream live speech text **as the admitted presenter** — see the gate below |
+| POST | `/api/spotlight/correct` | `{token, transcript}` | submit your final, edited transcript (the correction step) — same gate |
 | GET | `/api/config` | — | configured join URL |
 | GET | `/api/events` | — | the public SSE stream (above) |
+
+#### The admitted-presenter gate (trust boundary)
+
+`POST /api/spotlight/transcript` and `POST /api/spotlight/correct` are public guest
+routes, but the `{token}` in the body is **not trusted as authorization**. Both
+re-derive, on every request, the single source of truth `room.spotlight.participantToken`
+(set by the host's `admit`, cleared by every terminal transition) and reject all
+of these server-side:
+
+| Condition | Status |
+|---|---|
+| missing / non-string / never-minted token | **401** |
+| no live spotlight (none admitted, or already finished/stopped) | **409** |
+| spotlight belongs to a different / closed event | **409** |
+| a live spotlight but **not this token's turn** (a non-admitted or stale token) | **403** |
+
+`correct` additionally flips the caller's queue entry to `correcting`, which is a
+**hard precondition** for the host's `finish` — research/archive cannot run before
+the presenter has confirmed their transcript.
 
 ### Host / admin actions (private — local/Tailscale only, never public-proxied)
 
 `/admin` UI, `/api/event/open`·`/close`·`/archive`, `/api/mint`, `/api/mode`,
 `/api/skip`, `/api/timer/start`·`/clear`, `/api/announce`·`/announce/clear`,
 `/api/sprint/start`·`/pause`·`/resume`·`/skip`·`/extend`·`/stop` and
-`GET /api/sprint`, `/api/spotlight/start`·`/transcript`·`/insights`·`/end`,
+`GET /api/sprint`, `/api/spotlight/start`·`/insights`·`/end`,
+`/api/share/admit`·`/skip`·`/stop`·`/finish` (the phone-led queue's host
+controls — `admit` starts the presenter's spotlight, `finish` runs research+archives,
+both **off the public proxy** like every other host control),
 `/api/history`, `/api/reports`, `/api/attendees`, and `/api/show-events`. These
 return **404** on the public proxy by design (like `/api/timer/*`). See
 [CLAUDE.md](CLAUDE.md) for the full route table and the network/proxy split.

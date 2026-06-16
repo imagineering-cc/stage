@@ -138,6 +138,9 @@ function openEvent(title) {
   // previous event's requester-ordering pointer (which references dead tokens).
   for (const key of Object.keys(lastPlayedRequesterByVotes)) delete lastPlayedRequesterByVotes[key];
   if (room.spotlight) { archiveSpotlight(); room.spotlight = null; }
+  // A share queue never crosses an event boundary (eventId on each entry is
+  // belt-and-suspenders; this clear is the real guarantee).
+  room.shareQueue.length = 0;
   clearTimer();
   clearAnnouncement();
   room.mode = 'welcome';
@@ -163,6 +166,8 @@ function closeEvent() {
   // the next queued track in a room that's supposed to be resting.
   queue.splice(0, queue.length);
   if (room.spotlight) { archiveSpotlight(); room.spotlight = null; }
+  // Clear the share queue too — no presentation request survives the close.
+  room.shareQueue.length = 0;
   clearTimer();
   clearAnnouncement();
   event = { ...event, status: EVENT_STATUS.CLOSED, closedAt: Date.now() };

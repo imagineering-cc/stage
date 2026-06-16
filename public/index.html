@@ -170,6 +170,12 @@
     color: var(--text); font-size: 13px; line-height: 1.35;
   }
   .voice-heard.visible { display: block; }
+  .share-hint { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+  .share-final {
+    margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--accent);
+    color: var(--text); font-size: 13px; line-height: 1.35; white-space: pre-wrap;
+  }
+  #share-admitted .form-actions { gap: 10px; }
   .form-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
   .action-btn {
     border: 1px solid var(--accent); border-radius: 8px;
@@ -391,6 +397,53 @@
       <div class="panel-status" id="gesture-status" role="status" aria-live="polite">Off</div>
     </div>
   </section>
+
+  <!-- M2: phone-led share queue. The guest requests to present, the host admits
+       them, then THIS phone captures and confirms their spoken update. -->
+  <section class="tool-panel" id="share-panel" aria-label="Present your project" hidden>
+    <div class="panel-head">
+      <div class="section-label">Present to the room</div>
+      <div class="panel-status" id="share-status" role="status" aria-live="polite"></div>
+    </div>
+
+    <!-- idle: request to present -->
+    <div id="share-idle">
+      <p class="share-hint" id="share-consent-hint" hidden>Tick the live-transcription consent above to present.</p>
+      <div class="voice-tools">
+        <button class="voice-btn primary" id="share-request-share" type="button">Share project</button>
+        <button class="voice-btn" id="share-request-progress" type="button">Give progress update</button>
+      </div>
+    </div>
+
+    <!-- queued: waiting for the host -->
+    <div id="share-queued" hidden>
+      <div class="voice-state" id="share-position">Waiting…</div>
+      <button class="voice-btn" id="share-withdraw" type="button">Withdraw</button>
+    </div>
+
+    <!-- admitted: live capture on this phone -->
+    <div id="share-admitted" hidden>
+      <div class="voice-tools">
+        <button class="voice-btn primary" id="share-mic-start" type="button">Start speaking</button>
+        <button class="voice-btn" id="share-mic-stop" type="button" hidden>Stop</button>
+        <div class="voice-state" id="share-mic-status" role="status" aria-live="polite"></div>
+      </div>
+      <label class="field">Review &amp; confirm what was heard
+        <textarea id="share-transcript" maxlength="6000" rows="4"></textarea>
+      </label>
+      <div class="form-actions">
+        <button class="action-btn" id="share-confirm" type="button">Confirm &amp; submit</button>
+        <button class="voice-btn" id="share-withdraw-admitted" type="button">Withdraw</button>
+      </div>
+    </div>
+
+    <!-- correcting: submitted, waiting for host to finish -->
+    <div id="share-correcting" hidden>
+      <div class="voice-state">Submitted — thanks. The host will wrap up your turn.</div>
+      <div class="share-final" id="share-final-text"></div>
+      <button class="voice-btn" id="share-withdraw-correcting" type="button">Withdraw</button>
+    </div>
+  </section>
 </section>
 
 <div class="search-wrap">
@@ -453,6 +506,15 @@
   let voiceStep = 0;
   let voiceRunning = false;
   let roomOpen = true;
+  // M2 share-queue client state. shareId is the opaque id our /api/share/request
+  // returned — how we find OUR OWN row in the (tokenless) public projection.
+  let shareId = null;
+  let shareStatus = null;          // 'requested' | 'admitted' | 'correcting' | null
+  let lastShareQueue = [];
+  let shareRecognition = null;
+  let shareMicRunning = false;
+  let shareTranscriptDirty = false; // true once the guest edits the textarea
+  let myConsentRecording = false;
 
 // A room is OPEN only when an event object exists and its status is "open".
 // Anything else (null event, or status "closed") is the resting/closed state.
@@ -477,7 +539,11 @@ function applyEventState(event) {
       if (motionToggle) motionToggle.checked = false;
       setPanelStatus('gesture-status', 'Off');
     }
+    // A closing room ends any presentation in flight on this phone.
+    stopShareMic();
+    shareId = null; shareStatus = null;
   }
+  renderShareUi();
 }
 
 // Belt-and-braces: any guest fetch that comes back 403 with eventClosed:true
@@ -862,6 +928,8 @@ function renderIdentity() {
   document.getElementById('github-username').value = me.githubHandle || '';
   document.getElementById('recording-consent').checked = me.consentRecording === true;
   document.getElementById('research-consent').checked = me.consentResearch === true;
+  myConsentRecording = me.consentRecording === true;
+  renderShareUi();
   profileForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = false; });
   profileSave.disabled = false;
   voiceIntakeStart.disabled = !RecognitionApi;
@@ -1248,6 +1316,164 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 1400);
 }
 
+// ===== M2: phone-led share queue (guest side) =====
+// We never see our own token on the public wire (privacy), so we track OUR row
+// by the opaque `id` /api/share/request returned. Each SSE frame re-derives our
+// status from that row; the UI is a pure projection of it.
+function syncShareQueue(list) {
+  lastShareQueue = Array.isArray(list) ? list : [];
+  const mine = shareId ? lastShareQueue.find(e => e.id === shareId) : null;
+  const prevStatus = shareStatus;
+  if (!mine) {
+    // Our row is gone (finished / skipped / stopped / event boundary). Reset to idle.
+    if (shareId) { shareId = null; shareStatus = null; stopShareMic(); shareTranscriptDirty = false; }
+  } else {
+    shareStatus = mine.status;
+    // On the admitted->correcting transition initiated by the host elsewhere, or
+    // when we land in correcting, stop the mic.
+    if (shareStatus === 'correcting') stopShareMic();
+  }
+  renderShareUi();
+  // First time we see ourselves admitted, focus the capture flow.
+  if (prevStatus !== 'admitted' && shareStatus === 'admitted') {
+    shareTranscriptDirty = false;
+    setPanelStatus('share-status', "You're up — start speaking.");
+  }
+}
+
+function renderShareUi() {
+  const panel = document.getElementById('share-panel');
+  if (!panel) return;
+  // The panel only makes sense in an open room with a joined identity.
+  panel.hidden = !(roomOpen && token);
+  const idle = document.getElementById('share-idle');
+  const queued = document.getElementById('share-queued');
+  const admitted = document.getElementById('share-admitted');
+  const correcting = document.getElementById('share-correcting');
+  for (const el of [idle, queued, admitted, correcting]) if (el) el.hidden = true;
+
+  if (shareStatus === 'requested') {
+    queued.hidden = false;
+    const requested = lastShareQueue.filter(e => e.status === 'requested');
+    const pos = requested.findIndex(e => e.id === shareId);
+    const posEl = document.getElementById('share-position');
+    posEl.textContent = pos === 0 ? "You're next." : pos > 0 ? `You're #${pos + 1} in line.` : 'Waiting…';
+  } else if (shareStatus === 'admitted') {
+    admitted.hidden = false;
+  } else if (shareStatus === 'correcting') {
+    correcting.hidden = false;
+  } else {
+    idle.hidden = false;
+    // Recording consent is required to present — the server also enforces this.
+    const hint = document.getElementById('share-consent-hint');
+    document.getElementById('share-request-share').disabled = !myConsentRecording;
+    document.getElementById('share-request-progress').disabled = !myConsentRecording;
+    if (hint) hint.hidden = myConsentRecording;
+  }
+}
+
+async function requestShare(kind) {
+  if (!token) return;
+  try {
+    const data = await postGuestAction('/api/share/request', { token, kind });
+    if (data && data.id) { shareId = data.id; shareStatus = data.status || 'requested'; renderShareUi(); }
+  } catch(e) {
+    setPanelStatus('share-status', e.message === 'eventClosed' ? 'Room is closed' : 'Could not join the queue', true);
+  }
+}
+
+async function withdrawShare() {
+  if (!token) return;
+  stopShareMic();
+  try { await postGuestAction('/api/share/withdraw', { token }); } catch(e) {}
+  shareId = null; shareStatus = null; shareTranscriptDirty = false;
+  renderShareUi();
+}
+
+function startShareMic() {
+  if (!RecognitionApi || shareMicRunning) return;
+  const recognition = new RecognitionApi();
+  shareRecognition = recognition;
+  shareMicRunning = true;
+  recognition.lang = 'en-AU';
+  recognition.interimResults = true;
+  recognition.continuous = true;
+  recognition.maxAlternatives = 1;
+  let accumulated = '';
+  const area = document.getElementById('share-transcript');
+  document.getElementById('share-mic-start').hidden = true;
+  document.getElementById('share-mic-stop').hidden = false;
+  setPanelStatus('share-status', 'Listening…');
+  recognition.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const chunk = event.results[i][0].transcript;
+      if (event.results[i].isFinal) accumulated += chunk + ' ';
+      else interim += chunk;
+    }
+    const live = (accumulated + interim).replace(/\s+/g, ' ').trim();
+    // Only overwrite the textarea while the guest hasn't manually edited it.
+    if (!shareTranscriptDirty) area.value = live;
+    // Stream interim text so it drifts across the TV (gated server-side).
+    streamShareTranscript(live, false);
+  };
+  recognition.onerror = (event) => {
+    if (event.error === 'aborted') return;
+    setPanelStatus('share-status', event.error === 'not-allowed' ? 'Microphone permission denied' : 'Mic error', true);
+  };
+  recognition.onend = () => {
+    // Auto-restart while the guest still wants to capture (continuous can drop).
+    if (shareMicRunning) { try { recognition.start(); } catch(e) { shareMicRunning = false; } }
+  };
+  try { recognition.start(); } catch(e) { shareMicRunning = false; setPanelStatus('share-status', 'Speech unavailable', true); }
+}
+
+function stopShareMic() {
+  if (!shareRecognition) { shareMicRunning = false; return; }
+  shareMicRunning = false;
+  try { shareRecognition.abort(); } catch(e) {}
+  shareRecognition = null;
+  const startBtn = document.getElementById('share-mic-start');
+  const stopBtn = document.getElementById('share-mic-stop');
+  if (startBtn) startBtn.hidden = false;
+  if (stopBtn) stopBtn.hidden = true;
+}
+
+let shareStreamTimer = null;
+function streamShareTranscript(text, isFinal) {
+  // Throttle interim posts to ~1/300ms; this is best-effort, the gate is the server's.
+  if (shareStreamTimer) return;
+  shareStreamTimer = setTimeout(() => { shareStreamTimer = null; }, 300);
+  postGuestAction('/api/spotlight/transcript', { token, transcript: text, isFinal: !!isFinal }).catch(() => {});
+}
+
+async function confirmShareTranscript() {
+  if (!token) return;
+  stopShareMic();
+  const text = document.getElementById('share-transcript').value.trim();
+  try {
+    await postGuestAction('/api/spotlight/correct', { token, transcript: text });
+    document.getElementById('share-final-text').textContent = text;
+    setPanelStatus('share-status', 'Submitted');
+    // The SSE frame will flip us to 'correcting'; set it optimistically too.
+    shareStatus = 'correcting';
+    renderShareUi();
+  } catch(e) {
+    setPanelStatus('share-status', 'Could not submit — try again', true);
+  }
+}
+
+// wire share-queue buttons
+document.getElementById('share-request-share').addEventListener('click', () => requestShare('share'));
+document.getElementById('share-request-progress').addEventListener('click', () => requestShare('progress'));
+document.getElementById('share-withdraw').addEventListener('click', withdrawShare);
+document.getElementById('share-withdraw-admitted').addEventListener('click', withdrawShare);
+document.getElementById('share-withdraw-correcting').addEventListener('click', withdrawShare);
+document.getElementById('share-mic-start').addEventListener('click', startShareMic);
+document.getElementById('share-mic-stop').addEventListener('click', () => { stopShareMic(); setPanelStatus('share-status', 'Paused'); });
+document.getElementById('share-confirm').addEventListener('click', confirmShareTranscript);
+document.getElementById('share-transcript').addEventListener('input', () => { shareTranscriptDirty = true; });
+
 // SSE for now-playing + queue
 function connectEvents() {
   const es = new EventSource('/api/events');
@@ -1260,6 +1486,7 @@ function connectEvents() {
 	      renderQueue(latestQueue);
 	      syncVotes();
         syncVisualControls(data.visuals);
+        syncShareQueue(data.shareQueue || []);
 	    } catch(e) {}
 	  };
   es.onerror = () => { /* EventSource auto-reconnects */ };
