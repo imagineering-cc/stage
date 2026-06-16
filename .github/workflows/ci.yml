@@ -45,6 +45,13 @@ jobs:
           if [ -z "$ok" ]; then echo "server did not answer on :3000"; exit 1; fi
           echo "boot smoke test OK"
 
+      - name: Behaviour smoke suite
+        # Zero-dep harness (node:test) that boots the server and pins the
+        # load-bearing behaviours — event join-gating, lifecycle/playback guard,
+        # vote-ranked fair queue, idempotent vote toggle, spotlight archival —
+        # so a refactor that breaks one turns CI red. STAGE_NO_AUDIO skips mpv.
+        run: STAGE_NO_AUDIO=1 node test/smoke.js
+
   # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
   # validation passed — so untrusted PR code never reaches the Pi, and broken
   # code never gets deployed.
