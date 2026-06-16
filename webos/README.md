@@ -61,6 +61,35 @@ parameter the app reads (the `?engine=` query path).
   verified; needs a webOS TV in Developer Mode + the `ares-*` CLI (hardware not
   on hand). This is the open gate before calling the webOS surface "done".
 
+## Running alongside the Pi kiosk (they're coequal)
+
+This app does **not** replace the Pi's Chromium kiosk (`stage-kiosk.service`
+rendering `public/room.html`). Both are coequal, independent frontends on the
+same engine: each just opens its own `/api/events` stream, and the engine fans
+state out to every connected client. So you can run **either, or both at once**
+(two screens showing the same room), and choose per occasion — nothing in the
+engine is bound to one display.
+
+**Audio is not part of the display.** `mpv` lives in the engine
+(`stage-server.service`), so room sound always plays through the **Pi's HDMI
+output** (`vc4hdmi0`) regardless of which screen is showing. Both the kiosk and
+this webOS app are *visual* frontends only; stopping the kiosk frees the Pi's
+display output but never the audio.
+
+Switching the Pi kiosk for an event (over `ssh` to the Pi):
+
+```bash
+systemctl --user stop  stage-kiosk     # webOS night — free the Pi's HDMI display
+systemctl --user start stage-kiosk     # back to the Pi-driven screen
+# persist across reboots if you want it to stay off / on:
+systemctl --user disable stage-kiosk
+systemctl --user enable  stage-kiosk
+```
+
+To use this app, just launch it on the LG TV (`ares-launch` or the TV's
+launcher) and point it at the engine (see "Pointing it at an engine" above) —
+leave the kiosk running or stop it, your call.
+
 ## Alternative: hosted web app
 
 If you'd rather not maintain a separate TV view, webOS also supports a

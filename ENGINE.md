@@ -44,6 +44,12 @@ writes the current snapshot, so a frontend never needs to poll.
 The only difference between the two is the private `spotlight` field. Everything
 else is identical.
 
+Any number of frontends may attach at once — `broadcast()` fans state out to
+every connected client. The Pi Chromium kiosk and the native webOS app are
+coequal consumers, not alternatives: run either, or both simultaneously. (Audio
+is not a frontend concern — `mpv` runs in the engine, so room sound always comes
+from the Pi's HDMI regardless of which display is showing.)
+
 Both streams send `Access-Control-Allow-Origin: *`, so an **off-origin** frontend
 (a native webOS TV app, a separate dashboard) can open them directly — the engine
 serves public, read-only state here, so wildcard CORS is intentional. The
