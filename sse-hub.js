@@ -9,6 +9,7 @@
 // cycle. The event-session projection (`publicEvent`) still lives in server.js
 // pending a later carve, so it too is reached through `state.hooks.publicEvent`.
 
+const { ENGINE_PROTOCOL_VERSION } = require('./config');
 const state = require('./state');
 const {
   room,
@@ -27,6 +28,9 @@ const {
 // transcript for the local /api/show-events stream only.
 function statePayload({ includeSpotlight = false } = {}) {
   const payload = {
+    // Engine wire-protocol version (see config.js + ENGINE.md). First field so
+    // a frontend can read it off the very first SSE frame before parsing the rest.
+    version: ENGINE_PROTOCOL_VERSION,
     event: state.hooks.publicEvent(),
     nowPlaying: publicTrack(room.nowPlaying),
     queue: publicQueue(),
