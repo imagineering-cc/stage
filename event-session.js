@@ -4,11 +4,12 @@
 // carries only identity/title/status/dates — the live phase stays in `mode`
 // (its single source of truth) and is surfaced as `phase` in the payload.
 //
-// This module OWNS the `event` / `eventsArchive` state. It is reached by the
-// other modules only through state.js's late-bound `hooks` (currentEventId /
-// getEvent / getEventsArchive / publicEvent), wired by server.js's composition
-// root — so state/sse-hub/mpv/research never statically require this file and
-// there is no require cycle.
+// This module OWNS the `event` / `eventsArchive` state. routes.js (the top
+// consumer) requires it directly, but the LOWER modules — state/sse-hub/mpv/
+// research — reach it only through state.js's late-bound `hooks` (currentEventId
+// / getEvent / getEventsArchive / publicEvent), wired by server.js's composition
+// root. That asymmetry is what keeps the require graph acyclic: this file may
+// require those lower modules because none of them statically requires it back.
 const crypto = require('crypto');
 const { AUDIO_ENABLED } = require('./config');
 const {

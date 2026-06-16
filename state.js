@@ -345,6 +345,11 @@ function clearAnnouncement() {
 }
 
 module.exports = {
+  // the raw parsed state blob, read ONCE here at module load. Exported so
+  // event-session.js can hydrate event/eventsArchive from the SAME snapshot
+  // rather than re-reading the file (a second parse could diverge if the file
+  // changed between reads). See server.js's boot.
+  savedState,
   // reassigned-scalar holder (B)
   room,
   // reference-stable containers (A)

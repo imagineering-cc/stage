@@ -12,13 +12,13 @@ const { PORT, AUDIO_ENABLED } = require('./config');
 // it first so the containers are populated before anything reads them.
 const state = require('./state');
 const { queue, sortQueue, armTimerTimeout } = state;
-const savedState = state.loadPersistentState();
 
 // event-session.js owns the host-controlled event that gates participation.
-// Hydrate it from the persisted blob (and run the predates-the-event migration)
-// before wiring or boot.
+// Hydrate it from the SAME state blob state.js already parsed (state.savedState)
+// — not a second read — then run the predates-the-event migration before wiring
+// or boot.
 const eventSession = require('./event-session');
-eventSession.init(savedState);
+eventSession.init(state.savedState);
 
 const { broadcast } = require('./sse-hub');
 const { startMpv, listenMpvEvents, playNext } = require('./mpv');
