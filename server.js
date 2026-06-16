@@ -108,32 +108,10 @@ if (!event && (identities.size > 0 || queue.length > 0)) {
 }
 
 // --- SSE payload + broadcast ---
-// These read state but BELONG to sse-hub (state must not depend on sse), so they
-// stay here in the composition root; state.js calls broadcast via its `hooks`.
-function statePayload({ includeSpotlight = false } = {}) {
-  const payload = {
-    event: publicEvent(),
-    nowPlaying: publicTrack(room.nowPlaying),
-    queue: publicQueue(),
-    timer: currentTimer(),
-    mode: room.mode,
-    announcement: currentAnnouncement(),
-    visuals: room.visuals,
-    visualEvent: currentVisualEvent(),
-  };
-  if (includeSpotlight) payload.spotlight = hostSpotlight();
-  return payload;
-}
-
-function broadcast() {
-  const publicPayload = JSON.stringify(statePayload());
-  const showPayload = JSON.stringify(statePayload({ includeSpotlight: true }));
-  for (const client of sseClients) {
-    try {
-      client.res.write(`data: ${client.includeSpotlight ? showPayload : publicPayload}\n\n`);
-    } catch(e) {}
-  }
-}
+// Carved into sse-hub.js. statePayload reads state through the `room` holder and
+// state accessors; broadcast fans out to sseClients. state.js calls broadcast
+// back through its late-bound `hooks.broadcast` (wired in the composition root).
+const { broadcast, statePayload } = require('./sse-hub');
 
 // --- event lifecycle helpers ---
 // The id of the event new participation should be tagged with, or null when no
@@ -1055,6 +1033,7 @@ state.hooks.playNext = playNext;
 state.hooks.currentEventId = currentEventId;
 state.hooks.getEvent = () => event;
 state.hooks.getEventsArchive = () => eventsArchive;
+state.hooks.publicEvent = publicEvent;
 
 sortQueue();
 armTimerTimeout();

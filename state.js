@@ -48,6 +48,7 @@ const hooks = {
   currentEventId: () => null,
   getEvent: () => null,
   getEventsArchive: () => [],
+  publicEvent: () => null,
 };
 
 function loadPersistentState() {
