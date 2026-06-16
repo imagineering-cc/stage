@@ -29,12 +29,16 @@ const { requestHandler } = require('./routes');
 // mpv (broadcast/playNext) and the event-session module (event accessors). Wire
 // them now that every dependency is defined, BEFORE any boot call that may reach
 // through a hook (armTimerTimeout/playNext both broadcast; save reads getEvent).
-state.hooks.broadcast = broadcast;
-state.hooks.playNext = playNext;
-state.hooks.currentEventId = eventSession.currentEventId;
-state.hooks.getEvent = eventSession.getEvent;
-state.hooks.getEventsArchive = eventSession.getEventsArchive;
-state.hooks.publicEvent = eventSession.publicEvent;
+// wireHooks() also flips state's hooksWired flag, so a save before this point
+// fails loud instead of persisting event:null.
+state.wireHooks({
+  broadcast,
+  playNext,
+  currentEventId: eventSession.currentEventId,
+  getEvent: eventSession.getEvent,
+  getEventsArchive: eventSession.getEventsArchive,
+  publicEvent: eventSession.publicEvent,
+});
 
 sortQueue();
 armTimerTimeout();

@@ -41,7 +41,7 @@ const {
 const { generateName, colorForName } = require('./names');
 
 // Late-bound cross-module callbacks (see header note C). The composition root
-// overwrites these once every module is loaded; until then they are inert.
+// calls wireHooks() once every module is loaded; until then they are inert.
 const hooks = {
   broadcast: () => {},
   playNext: () => {},
@@ -50,6 +50,19 @@ const hooks = {
   getEventsArchive: () => [],
   publicEvent: () => null,
 };
+
+// Guard against the silent-data-loss footgun: savePersistentState() serializes
+// event/eventsArchive THROUGH hooks.getEvent()/getEventsArchive(). If a save
+// fires before the composition root wires them, the inert defaults return
+// null/[] and we'd persist `event:null` over a real open event. wireHooks()
+// flips this flag; savePersistentState() refuses to run until it does. There is
+// no legitimate save before wiring (loads/migration don't save; every save is
+// request-time), so this only ever catches a genuine wiring bug.
+let hooksWired = false;
+function wireHooks(impl) {
+  Object.assign(hooks, impl);
+  hooksWired = true;
+}
 
 function loadPersistentState() {
   try {
@@ -129,6 +142,11 @@ function normalizeVisuals(value) {
 }
 
 function savePersistentState() {
+  // Fail loud, not silent: persisting before hooks are wired would write
+  // event:null over a real event (see wireHooks above).
+  if (!hooksWired) {
+    throw new Error('savePersistentState() before state.wireHooks(): event/eventsArchive would persist as null. Wire hooks in the composition root before any save.');
+  }
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   const data = JSON.stringify({
     identities: Array.from(identities.entries()),
@@ -362,6 +380,7 @@ module.exports = {
   gestureTimes,
   // late-bound cross-module callbacks (C)
   hooks,
+  wireHooks,
   // persistence
   loadPersistentState,
   savePersistentState,
