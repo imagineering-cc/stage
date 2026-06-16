@@ -50,6 +50,11 @@ const hooks = {
   getEvent: () => null,
   getEventsArchive: () => [],
   publicEvent: () => null,
+  // Fired by markTimerEnded() AFTER the timer is marked 'ended', BEFORE its save.
+  // Inert until the composition root wires sprint.onTimerEnded; this is the seam
+  // that lets the sprint sequencer ride the ONE timer's end event (autonomous
+  // phase advance) instead of owning a competing setTimeout. See sprint.js.
+  onTimerEnded: () => {},
 };
 
 // Guard against the silent-data-loss footgun: savePersistentState() serializes
@@ -127,6 +132,31 @@ const lastPlayedRequesterByVotes = savedState.lastPlayedRequesterByVotes &&
 const sseClients = new Set(); // { res, includeSpotlight } stream clients
 const gestureTimes = new Map();
 
+// A persisted sprint session is only well-formed if it carries the fields the
+// running code (and the write-side gate) require. Hoisted above `room` so the
+// holder can hydrate room.sprint through it. SHARED by load-side hydration and
+// validateStateShape so the two can never disagree (the #808 lesson: anything
+// the gate rejects on write is dropped to null on read, so a lenient load can't
+// feed garbage to a strict write and crash-loop the appliance). A malformed
+// sprint degrades to idle (null), never crashes, never destroys other state.
+function isValidSprintSession(s) {
+  if (!isPlainObject(s)) return false;
+  if (typeof s.sessionId !== 'string') return false;
+  if (!['idle', 'running', 'winding-down', 'paused', 'done'].includes(s.status)) return false;
+  if (!Number.isInteger(s.phaseIndex) || s.phaseIndex < 0) return false;
+  if (s.pausedRemainingMs !== null && !Number.isFinite(s.pausedRemainingMs)) return false;
+  if (!Array.isArray(s.plan) || s.plan.length === 0) return false;
+  if (s.phaseIndex >= s.plan.length) return false;
+  for (const ph of s.plan) {
+    if (!isPlainObject(ph)) return false;
+    if (!SHOW_MODES.has(ph.mode)) return false;
+    if (typeof ph.label !== 'string') return false;
+    if (!Number.isFinite(ph.durationMs) || ph.durationMs <= 0) return false;
+    if (ph.visuals !== undefined && !isPlainObject(ph.visuals)) return false;
+  }
+  return true;
+}
+
 // Reassigned scalars live on this single holder (see header note B).
 const room = {
   nowPlaying: null,           // { ...trackEntry } | null
@@ -136,6 +166,7 @@ const room = {
   visuals: normalizeVisuals(savedState.visuals),
   visualEvent: null,          // short-lived phone gesture effect; never persisted
   spotlight: null,            // consented live speech transcript; archived only when explicitly ended
+  sprint: isValidSprintSession(savedState.sprint) ? savedState.sprint : null, // autonomous sprint session | null (idle)
 };
 
 // Module-private timeout handles (see header note about privacy).
@@ -229,6 +260,17 @@ function validateStateShape(d) {
     if (!Number.isFinite(d.timer.endsAt)) fail('timer.endsAt is not a finite number');
   }
 
+  // sprint: null (idle) or a well-formed session. Uses the SAME predicate the
+  // load side hydrates with, so load and write can never disagree (#808 lesson:
+  // a lenient load + strict write is a crash-loop). A persisted shape the gate
+  // would reject is loaded as null, so it can never reach this branch as garbage.
+  if (d.sprint !== null && !isValidSprintSession(d.sprint)) {
+    const why = !isPlainObject(d.sprint) ? 'sprint is not null or an object'
+      : !Array.isArray(d.sprint.plan) || d.sprint.plan.length === 0 ? 'sprint.plan is not a non-empty array'
+      : 'sprint session is malformed (sessionId/status/phaseIndex/plan)';
+    fail(why);
+  }
+
   if (d.event !== null && (typeof d.event !== 'object' || Array.isArray(d.event))) fail('event is not null or an object');
   if (d.event && typeof d.event.id !== 'string') fail('event.id is not a string');
 
@@ -264,6 +306,7 @@ function savePersistentState() {
     mode: room.mode,
     visuals: room.visuals,
     reports,
+    sprint: room.sprint,
     event: hooks.getEvent(),
     eventsArchive: hooks.getEventsArchive(),
   };
@@ -318,6 +361,10 @@ function createIdentity() {
 function markTimerEnded() {
   if (!room.timer || room.timer.status !== 'running') return;
   room.timer = { ...room.timer, status: 'ended', endedAt: Date.now() };
+  // Let the sprint sequencer react to the phase boundary (autonomous advance)
+  // BEFORE persisting, so a sprint state change rides the same save. Inert until
+  // wired; tolerant of being called when no sprint is running (see sprint.js).
+  hooks.onTimerEnded();
   savePersistentState();
 }
 
@@ -521,6 +568,7 @@ module.exports = {
   loadPersistentState,
   savePersistentState,
   validateStateShape,
+  isValidSprintSession,
   // identity + helpers
   createIdentity,
   clamp,

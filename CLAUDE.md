@@ -164,8 +164,10 @@ Architectural choices worth defending:
   registry wired by `server.js`'s composition root, which breaks the require
   cycles without adding a dependency. See [ENGINE.md](ENGINE.md).
 - **The SSE payload IS the engine's public API** — `{version, event, nowPlaying,
-  queue, timer, mode, announcement, visuals, visualEvent, [spotlight]}` is a
-  versioned, CORS-open, CI-enforced wire contract. Any number of frontends
+  queue, timer, mode, announcement, visuals, visualEvent, sprint, [spotlight]}`
+  is a versioned, CORS-open, CI-enforced wire contract. `sprint` is the
+  autonomous Dreamfinder-hosted sprint session (or null when idle; see
+  ENGINE.md). Any number of frontends
   (guest PWA, admin, room TV, native webOS app) consume it and render N ways; no
   service-to-service plumbing. Adding a show = adding fields, not services.
 - **Private speech stream** — `/api/events` is publicly proxied for guests, but
@@ -262,6 +264,7 @@ stage/
 ├── sse-hub.js         # statePayload (the wire contract) + broadcast fan-out
 ├── mpv.js             # mpv JSON-IPC + playNext
 ├── research.js        # consented GitHub/arXiv/OpenAlex + spotlight facilitation
+├── sprint.js          # autonomous Dreamfinder-hosted sprint sequencer (rides the one timer)
 ├── ytSearch.js        # yt-dlp child for YouTube search
 ├── names.js           # Dreamfinder handle generator
 ├── routes.js          # HTTP dispatch + helpers + open-event guard
@@ -316,6 +319,13 @@ stage/
 | POST   | `/api/spotlight/end` | Host archives and clears the spotlight        |
 | POST   | `/api/timer/start`  | Body `{minutes}` or `{seconds}` → starts timer |
 | POST   | `/api/timer/clear`  | Clears active/ended timer                     |
+| GET    | `/api/sprint`       | Host-only current sprint session + full plan  |
+| POST   | `/api/sprint/start` | Host starts a sprint `{plan?, durations?, windDownMs?}`; 409 if running |
+| POST   | `/api/sprint/pause` | Host pauses the running phase (banks remaining time) |
+| POST   | `/api/sprint/resume`| Host resumes a paused phase                   |
+| POST   | `/api/sprint/skip`  | Host advances now (runs the wind-down ceremony early) |
+| POST   | `/api/sprint/extend`| Host adds time to the running phase `{minutes\|seconds}` |
+| POST   | `/api/sprint/stop`  | Host ends the session; room returns to free-jukebox |
 | GET    | `/api/events`       | Public SSE playback/visual state; no transcript |
 | GET    | `/api/show-events`  | Private room/admin SSE including spotlight text/results |
 

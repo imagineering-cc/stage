@@ -11,6 +11,9 @@
 
 const { ENGINE_PROTOCOL_VERSION } = require('./config');
 const state = require('./state');
+// sprint requires {state, config, mpv} — NOT sse-hub — so there is no cycle:
+// sprint->state, sse-hub->{state,sprint}, with no back-edge into sse-hub.
+const sprint = require('./sprint');
 const {
   room,
   sseClients,
@@ -39,6 +42,9 @@ function statePayload({ includeSpotlight = false } = {}) {
     announcement: currentAnnouncement(),
     visuals: room.visuals,
     visualEvent: currentVisualEvent(),
+    // Autonomous sprint session projection, or null when idle. On BOTH streams:
+    // phase/progress is shown on the TV, not private. Additive — version stays 1.
+    sprint: sprint.sprintProjection(),
   };
   if (includeSpotlight) payload.spotlight = hostSpotlight();
   return payload;

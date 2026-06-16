@@ -551,6 +551,7 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
     eventsArchive: [],
     lastPlayedRequesterByVotes: { '0': null },
     timer: null,
+    sprint: null,
     event: null,
     mode: 'free-jukebox',
     visuals: normalizeVisuals({}),
@@ -569,6 +570,10 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
     ['timer', (d) => { d.timer = {}; }, 'timer'],
     ['lastPlayedRequesterByVotes', (d) => { d.lastPlayedRequesterByVotes = []; }, 'lastPlayedRequesterByVotes'],
     ['eventsArchive', (d) => { d.eventsArchive = [123]; }, 'eventsArchive'],
+    // sprint write-side gate proves it rejects the SAME shapes the load side drops
+    // (the #808 load/write symmetry for the new persisted field).
+    ['sprint missing sessionId/plan', (d) => { d.sprint = { status: 'running', phaseIndex: 0 }; }, 'sprint'],
+    ['sprint.plan bad mode', (d) => { d.sprint = { sessionId: 'x', status: 'running', phaseIndex: 0, plan: [{ mode: 'bogus', label: 'x', durationMs: 1000 }], pausedRemainingMs: null }; }, 'plan'],
     // NaN/Infinity are typeof 'number' — the gate must use Number.isFinite or
     // these slip through and re-corrupt on the next reload (adversarial finding).
     ['timer.endsAt NaN', (d) => { d.timer = { id: 't', status: 'running', endsAt: NaN }; }, 'endsAt'],
@@ -673,6 +678,215 @@ test('resilience: a malformed persisted timer does not crash the room on first j
     // The poison timer was dropped on load, so persisted state carries timer:null.
     const persisted = JSON.parse(fs.readFileSync(sf, 'utf8'));
     assert.equal(persisted.timer, null, 'malformed timer was dropped to null, not persisted forward');
+  } finally {
+    if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Sprint-mode helpers. sseSnapshotAt opens the first SSE frame on an arbitrary
+// base (the boot children run on their own ports); waitForSprint polls the show
+// stream until a predicate over the `sprint` projection holds, or throws.
+// ---------------------------------------------------------------------------
+function sseSnapshotAt(base, streamPath = '/api/events') {
+  return new Promise((resolve, reject) => {
+    const http = require('node:http');
+    const r = http.get(base + streamPath, (res) => {
+      let buf = '';
+      res.on('data', (d) => {
+        buf += d.toString();
+        const i = buf.indexOf('\n\n');
+        if (i >= 0) {
+          const frame = buf.slice(0, i);
+          res.destroy();
+          const line = frame.split('\n').find((l) => l.startsWith('data: '));
+          resolve(JSON.parse(line.slice('data: '.length)));
+        }
+      });
+      res.on('error', reject);
+    });
+    r.on('error', reject);
+    r.setTimeout(5000, () => { r.destroy(); reject(new Error('SSE timeout')); });
+  });
+}
+
+async function waitForSprint(pred, { base = BASE, streamPath = '/api/show-events', timeoutMs = 3000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  for (;;) {
+    const snap = await sseSnapshotAt(base, streamPath);
+    last = snap.sprint;
+    if (pred(snap.sprint)) return snap;
+    if (Date.now() > deadline) {
+      throw new Error(`waitForSprint timed out; last sprint = ${JSON.stringify(last)}`);
+    }
+    await new Promise((r) => setTimeout(r, 40));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 14. autonomous advance + override + wind-down (shared running child). A phase
+//     timer ending must, WITHOUT any human action, run the wind-down ceremony and
+//     advance to the next phase (riding the ONE state.js timer, not a parallel
+//     sprint timeout). Then exercise the host overrides: skip, pause/resume
+//     (round-tripping the one timer), extend, stop, and the double-start guard.
+// ---------------------------------------------------------------------------
+test('sprint: autonomous advance off the timer-end path + host overrides', async () => {
+  await openEvent('Sprint Test');
+
+  // Tiny durations + tiny windDownMs so a full phase + ceremony fits sub-second.
+  const r = await post('/api/sprint/start', { durations: [150, 150, 150], windDownMs: 120 });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.sprint.status, 'running');
+  assert.equal(r.body.sprint.phaseIndex, 0);
+  assert.equal(r.body.sprint.totalPhases, 3);
+
+  // phase 0 (150ms) ends -> wind-down (120ms) -> autonomous advance to phase 1.
+  await waitForSprint((s) => s && s.phaseIndex === 1 && s.status === 'running');
+
+  let snap = await sseSnapshot('/api/events');
+  assert.equal(snap.sprint.phaseIndex, 1, 'advanced autonomously off the timer-end path');
+  assert.equal(snap.version, 1, 'protocol version stays 1 (additive field)');
+  assert.equal(snap.mode, snap.sprint.currentPhase.mode, 'room mode tracks the active phase');
+  assert.ok(snap.timer && snap.timer.status === 'running', 'a fresh phase timer was armed on advance');
+
+  // override: skip advances now (full ceremony, just early).
+  await post('/api/sprint/skip');
+  await waitForSprint((s) => s && s.phaseIndex === 2);
+
+  // pause/resume round-trips through the ONE timer.
+  const pz = await post('/api/sprint/pause');
+  assert.equal(pz.body.sprint.status, 'paused');
+  const badExtend = await post('/api/sprint/extend', { minutes: 5 });
+  assert.equal(badExtend.status, 409, 'extend rejected while paused');
+  const rs = await post('/api/sprint/resume');
+  assert.equal(rs.body.sprint.status, 'running');
+
+  // extend while running succeeds.
+  const ex = await post('/api/sprint/extend', { minutes: 1 });
+  assert.equal(ex.status, 200);
+
+  // stop returns the room to idle + free-jukebox.
+  const stop = await post('/api/sprint/stop');
+  assert.equal(stop.body.sprint, null);
+  snap = await sseSnapshot('/api/events');
+  assert.equal(snap.sprint, null, 'sprint projection is null after stop');
+  assert.equal(snap.mode, 'free-jukebox', 'room handed back to the jukebox on stop');
+
+  // double-start guard.
+  await post('/api/sprint/start', { durations: [150] });
+  const dup = await post('/api/sprint/start', { durations: [150] });
+  assert.equal(dup.status, 409, 'a second start while running is a 409');
+  await post('/api/sprint/stop');
+});
+
+// ---------------------------------------------------------------------------
+// 15. restart-resume mid-sprint. A Pi restart mid-sprint must resume the RIGHT
+//     phase with the RIGHT remaining time (no double-advance when the timer is
+//     still in the future; catch-up when it already ended while down).
+// ---------------------------------------------------------------------------
+test('sprint: a restart mid-sprint resumes the right phase (future + past timer)', async () => {
+  const plan = [
+    { mode: 'sprint-build', label: 'Build 1', durationMs: 60000 },
+    { mode: 'sprint-share', label: 'Share 1', durationMs: 60000 },
+  ];
+
+  // ---- variant A: timer still in the FUTURE -> resume phase 0, no advance ----
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sprint-resume-'));
+    const sf = path.join(dir, 'state.json');
+    const now = Date.now();
+    fs.writeFileSync(sf, JSON.stringify({
+      identities: [], playHistory: [], queue: [], reports: [], eventsArchive: [],
+      lastPlayedRequesterByVotes: { '0': null },
+      timer: { id: 't1', label: 'Build 1', durationMs: 60000, startedAt: now - 1000, endsAt: now + 59000, status: 'running' },
+      sprint: { sessionId: 's1', plan, phaseIndex: 0, status: 'running', pausedRemainingMs: null },
+      event: { id: 'evt-sprint', title: 'Sprint', status: 'open', openedAt: 1, closedAt: null },
+      mode: 'sprint-build', visuals: {},
+    }));
+    let boot;
+    try {
+      boot = await bootOnce(sf);
+      const base = `http://127.0.0.1:${boot.port}`;
+      const snap = await sseSnapshotAt(base, '/api/show-events');
+      assert.equal(snap.sprint.status, 'running', 'resumed running');
+      assert.equal(snap.sprint.phaseIndex, 0, 'resumed the SAME phase (no double-advance)');
+      assert.equal(snap.sprint.currentPhase.label, 'Build 1');
+      assert.ok(snap.timer, 'the persisted phase timer was re-armed on boot');
+    } finally {
+      if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // ---- variant B: timer in the PAST -> phase ended while down -> catch up ----
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sprint-resume-past-'));
+    const sf = path.join(dir, 'state.json');
+    const now = Date.now();
+    fs.writeFileSync(sf, JSON.stringify({
+      identities: [], playHistory: [], queue: [], reports: [], eventsArchive: [],
+      lastPlayedRequesterByVotes: { '0': null },
+      timer: { id: 't2', label: 'Build 1', durationMs: 60000, startedAt: now - 61000, endsAt: now - 1000, status: 'running' },
+      sprint: { sessionId: 's2', plan, phaseIndex: 0, status: 'running', pausedRemainingMs: null },
+      event: { id: 'evt-sprint2', title: 'Sprint', status: 'open', openedAt: 1, closedAt: null },
+      mode: 'sprint-build', visuals: {},
+    }));
+    let boot;
+    try {
+      boot = await bootOnce(sf);
+      const base = `http://127.0.0.1:${boot.port}`;
+      // The stale phase ended while down: armSprintOnBoot finishes the wind-down
+      // (default WIND_DOWN_MS) and advances to phase 1. Poll until it lands.
+      await waitForSprint((s) => s && s.phaseIndex === 1, { base, timeoutMs: 60000 });
+    } finally {
+      if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 16. a malformed persisted sprint degrades (no crash), and the wire field is
+//     additive + null when idle + version stays 1. Mirrors the test-13 crash-loop
+//     lock for the new persisted field.
+// ---------------------------------------------------------------------------
+test('sprint: a malformed persisted sprint degrades to idle without crashing', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-badsprint-'));
+  const sf = path.join(dir, 'state.json');
+  // Parses fine; event hydrates OPEN (so /api/join is allowed); the sprint is a
+  // shape the write-side gate would reject (missing sessionId/plan).
+  fs.writeFileSync(sf, JSON.stringify({
+    identities: [], playHistory: [], queue: [], reports: [], eventsArchive: [],
+    lastPlayedRequesterByVotes: { '0': null },
+    timer: null,
+    sprint: { status: 'running', phaseIndex: 0 }, // poison: no sessionId/plan
+    event: { id: 'evt-badsprint', title: 'Bad Sprint', status: 'open', openedAt: 1, closedAt: null },
+    mode: 'free-jukebox', visuals: {},
+  }));
+
+  let boot;
+  try {
+    boot = await bootOnce(sf);
+    const base = `http://127.0.0.1:${boot.port}`;
+
+    // A guest join drives createIdentity -> savePersistentState. The malformed
+    // sprint must NOT crash the save (it was dropped to null on load).
+    const joined = await fetch(base + '/api/join', { method: 'POST' });
+    assert.equal(joined.status, 200, 'join succeeds — malformed sprint did not crash the save');
+    const still = await fetch(base + '/api/config');
+    assert.ok(still.ok, 'server is still up and serving after the join');
+
+    // The poison sprint was dropped on load, so persisted state carries sprint:null.
+    const persisted = JSON.parse(fs.readFileSync(sf, 'utf8'));
+    assert.equal(persisted.sprint, null, 'malformed sprint dropped to null, not persisted forward');
+
+    // The wire field is present, additive, null when idle, and version stays 1.
+    const snap = await sseSnapshotAt(base, '/api/events');
+    assert.equal(snap.version, 1, 'protocol version stays 1');
+    assert.ok('sprint' in snap, 'sprint field is present on the public stream');
+    assert.equal(snap.sprint, null, 'sprint is null when idle');
   } finally {
     if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
     fs.rmSync(dir, { recursive: true, force: true });

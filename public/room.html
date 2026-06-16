@@ -286,6 +286,41 @@
   body[data-mode="sprint-break"] #phase-pill { --phase-color: #fb7185; }
   body[data-mode="cool-down"] #phase-pill { --phase-color: #a78bfa; }
 
+  /* Sprint banner — autonomous Dreamfinder host. Sits under the phase pill. */
+  #sprint-banner {
+    position: fixed;
+    top: 5.2rem;
+    left: 2rem;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 0.55rem 1.1rem;
+    border-radius: 999px;
+    background: rgba(10, 12, 28, 0.62);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    font-size: 1.05rem;
+    letter-spacing: 0.02em;
+    color: #e2e8f0;
+  }
+  #sprint-banner[hidden] { display: none; }
+  #sprint-phase-label { font-weight: 700; }
+  #sprint-progress { opacity: 0.72; font-variant-numeric: tabular-nums; }
+  #sprint-status-pill {
+    padding: 0.18rem 0.7rem;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    background: var(--sprint-pill-bg, rgba(59, 130, 246, 0.25));
+    color: var(--sprint-pill-fg, #93c5fd);
+  }
+  #sprint-banner[data-status="winding-down"] { --sprint-pill-bg: rgba(251, 191, 36, 0.22); --sprint-pill-fg: #fcd34d; }
+  #sprint-banner[data-status="paused"] { --sprint-pill-bg: rgba(148, 163, 184, 0.22); --sprint-pill-fg: #cbd5e1; }
+  #sprint-banner[data-status="done"] { --sprint-pill-bg: rgba(16, 185, 129, 0.22); --sprint-pill-fg: #6ee7b7; }
+
   /* ─── PLAYING STATE ──────────────────────────────────── */
   #playing {
     position: fixed; inset: 0;
@@ -1113,6 +1148,15 @@
   <span id="phase-name" aria-live="polite">Stage</span>
 </div>
 
+<!-- Sprint banner — only shown while Dreamfinder is autonomously hosting a
+     sprint session. The existing split-flap clock / progress bar / visuals all
+     react to timer/mode/visuals on their own, so this just names the phase. -->
+<div id="sprint-banner" aria-live="polite" hidden>
+  <span id="sprint-phase-label">Build</span>
+  <span id="sprint-progress">Sprint 1 of 3</span>
+  <span id="sprint-status-pill">Building</span>
+</div>
+
 <!-- ── IDLE ─────────────────────────────────────── -->
 <div id="idle">
   <div class="idle-bg"></div>
@@ -1639,7 +1683,43 @@
     nowLabel.textContent = presentation.playing;
   }
 
-	  function renderNowPlaying(track) {
+	  const sprintBanner = document.getElementById('sprint-banner');
+  const sprintPhaseLabel = document.getElementById('sprint-phase-label');
+  const sprintProgress = document.getElementById('sprint-progress');
+  const sprintStatusPill = document.getElementById('sprint-status-pill');
+  const SPRINT_STATUS_LABEL = {
+    'running': 'Live',
+    'winding-down': 'Wrapping up…',
+    'paused': 'Paused',
+    'done': 'Done',
+  };
+
+  // Render the sprint banner. The clock/progress/visuals already react to
+  // timer/mode/visuals, and the wind-down shows as the amber announcement, so
+  // this only names the phase + "N of M" + a status pill. Hidden when idle.
+  function renderSprint(sprint) {
+    if (!sprint || sprint.status === 'idle') {
+      sprintBanner.hidden = true;
+      return;
+    }
+    sprintBanner.hidden = false;
+    sprintBanner.dataset.status = sprint.status;
+    const cur = sprint.currentPhase || {};
+    sprintPhaseLabel.textContent = cur.label || '';
+    sprintProgress.textContent = `Phase ${Number(sprint.phaseIndex || 0) + 1} of ${sprint.totalPhases || 1}`;
+    let pill = SPRINT_STATUS_LABEL[sprint.status] || sprint.status;
+    if (sprint.status === 'running') {
+      // Use the phase's character for the running pill when it's a build/share.
+      if (cur.mode === 'sprint-build') pill = 'Building';
+      else if (cur.mode === 'sprint-share') pill = 'Sharing';
+      else if (cur.mode === 'sprint-break') pill = 'Break';
+      else if (cur.mode === 'welcome') pill = 'Welcome';
+      else if (cur.mode === 'cool-down') pill = 'Cooling down';
+    }
+    sprintStatusPill.textContent = pill;
+  }
+
+  function renderNowPlaying(track) {
 	    nowThumb.src = track.thumbnail || '';
 	    nowTitle.textContent = track.title || '';
 	    nowRequester.textContent = track.requesterName || '';
@@ -2081,7 +2161,7 @@
   }
 
   // ── Main render ────────────────────────────────────────
-  function render({ nowPlaying, queue, timer, announcement, mode, visuals, visualEvent, spotlight, event }) {
+  function render({ nowPlaying, queue, timer, announcement, mode, visuals, visualEvent, spotlight, event, sprint }) {
     // Ambient Canvas keeps breathing in every state, so visuals render first.
     renderVisuals(visuals);
     renderVisualEvent(visualEvent);
@@ -2092,6 +2172,7 @@
       renderTimer(null);
       renderAnnouncement(null);
       renderSpotlight(null);
+      renderSprint(null);
       currentTrackId = null;
       showIdle();          // settle idle/playing toggles to a known state…
       showClosed(event);   // …then the closed overlay supersedes them.
@@ -2103,6 +2184,7 @@
     renderTimer(timer);
     renderAnnouncement(announcement);
     renderSpotlight(spotlight);
+    renderSprint(sprint);
 
     if (!nowPlaying) {
       showIdle();

@@ -34,6 +34,7 @@ const {
   sseClients,
 } = require('./state');
 const { broadcast, statePayload } = require('./sse-hub');
+const sprint = require('./sprint');
 const { mpvSend, playNext } = require('./mpv');
 const { ytSearch } = require('./ytSearch');
 const { developSpotlightInsights, archiveSpotlight } = require('./research');
@@ -259,6 +260,58 @@ async function requestHandler(req, res) {
   if (method === 'POST' && p === '/api/timer/clear') {
     clearTimer();
     return send(res, 200, { timer: null });
+  }
+
+  // sprint mode (autonomous Dreamfinder host) — HOST-ONLY, kept OFF the public
+  // Caddy proxy exactly like /api/timer/*. Each control wraps the sprint.js fn;
+  // a thrown precondition error becomes a 409 (a malformed-input throw a 400).
+  if (method === 'GET' && p === '/api/sprint') {
+    // Full plan is host-only here; the public wire projection is current+next.
+    return send(res, 200, { sprint: sprint.sprintProjection(), plan: room.sprint?.plan || null });
+  }
+
+  if (method === 'POST' && p === '/api/sprint/start') {
+    const body = await readBody(req);
+    try {
+      const projection = sprint.startSprint({ plan: body.plan, durations: body.durations, windDownMs: body.windDownMs });
+      return send(res, 200, { sprint: projection });
+    } catch (err) {
+      // A double-start ("already running") is a 409 conflict; a bad plan/duration
+      // is a 400 bad request. Distinguish on the message the sequencer throws.
+      const conflict = /already running/.test(err.message);
+      return send(res, conflict ? 409 : 400, { error: err.message });
+    }
+  }
+
+  if (method === 'POST' && p === '/api/sprint/pause') {
+    try { return send(res, 200, { sprint: sprint.pauseSprint() }); }
+    catch (err) { return send(res, 409, { error: err.message }); }
+  }
+
+  if (method === 'POST' && p === '/api/sprint/resume') {
+    try { return send(res, 200, { sprint: sprint.resumeSprint() }); }
+    catch (err) { return send(res, 409, { error: err.message }); }
+  }
+
+  if (method === 'POST' && p === '/api/sprint/skip') {
+    try { return send(res, 200, { sprint: sprint.skipPhase() }); }
+    catch (err) { return send(res, 409, { error: err.message }); }
+  }
+
+  if (method === 'POST' && p === '/api/sprint/extend') {
+    const body = await readBody(req);
+    try {
+      return send(res, 200, { sprint: sprint.extendSprint({ minutes: body.minutes, seconds: body.seconds }) });
+    } catch (err) {
+      // "no running sprint" is a 409 conflict; an out-of-range duration is a 400.
+      const badInput = /between 1 second/.test(err.message);
+      return send(res, badInput ? 400 : 409, { error: err.message });
+    }
+  }
+
+  if (method === 'POST' && p === '/api/sprint/stop') {
+    try { return send(res, 200, { sprint: sprint.stopSprint() }); }
+    catch (err) { return send(res, 409, { error: err.message }); }
   }
 
   // room announcement controls

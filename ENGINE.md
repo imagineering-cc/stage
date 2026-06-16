@@ -71,6 +71,7 @@ and is a future step, tracked when a native *guest* frontend is built. The room
   "announcement": Announcement | null,
   "visuals":    Visuals,         // generative-background controls (always present)
   "visualEvent": VisualEvent | null, // transient gesture burst (~5s), or null
+  "sprint":     Sprint | null,       // autonomous sprint session, or null when idle
   "spotlight":  Spotlight | null     // SHOW STREAM ONLY — omitted on /api/events
 }
 ```
@@ -123,6 +124,25 @@ single source of truth.
 { "id": string, "type": "shake", "intensity": number, // 0..1
   "color": string, "requesterName": string, "at": number }
 ```
+
+**Sprint** (autonomous Dreamfinder-hosted sprint session; on BOTH streams)
+```jsonc
+{ "status": "running" | "winding-down" | "paused" | "done",
+  "phaseIndex": number,            // 0-based index into the session plan
+  "totalPhases": number,
+  "currentPhase": { "label": string, "mode": string,   // mode ∈ SHOW_MODES
+                    "durationMs": number, "progress": number }, // progress 0..1
+  "nextPhase": { "label": string, "mode": string } | null }     // null on last phase
+```
+`sprint === null` means no session is running. Sprint mode is **Dreamfinder
+hosting the meetup**: when a phase's timer ends the engine autonomously ducks
+the music, lands a soft chime, announces the next phase in the Dreamfinder
+voice, and advances. `currentPhase.mode` drives the same `mode`/`timer`/
+`visuals` fields a frontend already renders, so a sprint needs no new rendering
+primitives — show `phaseIndex+1 of totalPhases` + the label, and the existing
+clock/progress/visuals react on their own. The wind-down is visible as an amber
+`announcement`. Host controls are private (`/api/sprint/*`, below); the
+projection itself is public so guests see the room's structure.
 
 **Spotlight** (SHOW STREAM ONLY — consented live spoken intro/progress)
 ```jsonc
@@ -179,10 +199,11 @@ treat `eventClosed: true` as "render the closed room", not as a hard error.
 
 `/admin` UI, `/api/event/open`·`/close`·`/archive`, `/api/mint`, `/api/mode`,
 `/api/skip`, `/api/timer/start`·`/clear`, `/api/announce`·`/announce/clear`,
-`/api/spotlight/start`·`/transcript`·`/insights`·`/end`, `/api/history`,
-`/api/reports`, `/api/attendees`, and `/api/show-events`. These return **404**
-on the public proxy by design. See [CLAUDE.md](CLAUDE.md) for the full route
-table and the network/proxy split.
+`/api/sprint/start`·`/pause`·`/resume`·`/skip`·`/extend`·`/stop` and
+`GET /api/sprint`, `/api/spotlight/start`·`/transcript`·`/insights`·`/end`,
+`/api/history`, `/api/reports`, `/api/attendees`, and `/api/show-events`. These
+return **404** on the public proxy by design (like `/api/timer/*`). See
+[CLAUDE.md](CLAUDE.md) for the full route table and the network/proxy split.
 
 ## Writing a new frontend
 
@@ -195,4 +216,5 @@ table and the network/proxy split.
 
 That is the entire contract. The engine can grow new shows (sprint, welcome,
 reflect, share) by adding fields to this payload and rendering them N ways — the
-`{version, event, nowPlaying, queue, timer, mode, ...}` shape is the stable seam.
+`{version, event, nowPlaying, queue, timer, mode, sprint, ...}` shape is the
+stable seam.
