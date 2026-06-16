@@ -27,6 +27,19 @@ const GITHUB_TOKEN = process.env.STAGE_GITHUB_TOKEN || '';
 const SHOW_MODES = new Set(['welcome', 'free-jukebox', 'sprint-build', 'sprint-share', 'sprint-break', 'cool-down']);
 const VISUAL_THEMES = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
 
+// Sprint-mode (autonomous Dreamfinder host) timing constants. WIND_DOWN_MS is
+// the duration of the graceful musical wind-down at each phase boundary: the
+// currently-playing jukebox track is ducked from DUCK_FROM down to DUCK_TO over
+// this window, a soft chime lands CHIME_LEAD_MS before the boundary, then volume
+// is restored as the next phase begins. DONE_HOLD_MS holds the 'cool-down' phase
+// after the final phase ends before the session clears to idle. All overridable
+// per-start (windDownMs) only for tests; durations are the production defaults.
+const WIND_DOWN_MS = Number(process.env.STAGE_WIND_DOWN_MS || 45000);
+const DONE_HOLD_MS = Number(process.env.STAGE_DONE_HOLD_MS || 30000);
+const CHIME_LEAD_MS = Number(process.env.STAGE_CHIME_LEAD_MS || 10000);
+const DUCK_FROM = 70; // matches mpv's --volume=70 start
+const DUCK_TO = 8;    // soft floor the track ducks to under the chime
+
 module.exports = {
   ENGINE_PROTOCOL_VERSION,
   PORT,
@@ -42,4 +55,9 @@ module.exports = {
   GITHUB_TOKEN,
   SHOW_MODES,
   VISUAL_THEMES,
+  WIND_DOWN_MS,
+  DONE_HOLD_MS,
+  CHIME_LEAD_MS,
+  DUCK_FROM,
+  DUCK_TO,
 };

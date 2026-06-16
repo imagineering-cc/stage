@@ -196,6 +196,8 @@
     }
     .danger-btn:hover { background: rgba(248,113,113,0.12); }
     .danger-btn:disabled { opacity: 0.45; cursor: default; }
+    .sprint-host-note { font-size: 0.78rem; font-weight: 400; opacity: 0.55; }
+    #sprint-status { margin: 0.2rem 0 0.6rem; opacity: 0.85; }
     .panel h2 {
       font-size: 0.7rem;
       text-transform: uppercase;
@@ -621,6 +623,19 @@
 	    </div>
 	  </section>
 
+	  <section class="panel" id="sprint-panel">
+    <h2>Sprint <span class="sprint-host-note">— Dreamfinder hosts</span></h2>
+    <div id="sprint-status">No sprint running.</div>
+    <div class="timer-controls">
+      <button class="action-btn" id="sprint-start-btn" onclick="startSprint()">Start 3×25</button>
+      <button class="ghost-btn" id="sprint-pause-btn" onclick="sprintAction('pause')" hidden>Pause</button>
+      <button class="ghost-btn" id="sprint-resume-btn" onclick="sprintAction('resume')" hidden>Resume</button>
+      <button class="ghost-btn" id="sprint-skip-btn" onclick="sprintAction('skip')" hidden>Skip phase</button>
+      <button class="ghost-btn" id="sprint-extend-btn" onclick="extendSprint(5)" hidden>+5 min</button>
+      <button class="ghost-btn" id="sprint-stop-btn" onclick="sprintAction('stop')" hidden>Stop</button>
+    </div>
+  </section>
+
 	  <section class="panel">
     <h2>Timer</h2>
     <div id="timer-display">--:--</div>
@@ -734,6 +749,7 @@
 	        renderPlayback(state);
 		        renderTimer(state.timer);
 		        renderMode(state.mode);
+		        renderSprint(state.sprint);
 	          if (Object.prototype.hasOwnProperty.call(state, 'spotlight')) {
 	            renderSpotlight(state.spotlight);
 	          }
@@ -1029,6 +1045,73 @@
       if (!timerTick) timerTick = setInterval(updateTimerClock, 250);
       updateTimerClock();
     }
+
+    // ── Sprint (autonomous Dreamfinder host) ───────────────
+    // The room runs the show: Start kicks off the default 3×25 plan and the
+    // engine advances itself. These controls are the host grabbing the wheel.
+    async function startSprint() {
+      try {
+        const res = await fetch(`${API}/api/sprint/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+      } catch (err) { alert(`Sprint start failed: ${err.message}`); }
+    }
+
+    async function sprintAction(action) {
+      try {
+        const res = await fetch(`${API}/api/sprint/${action}`, { method: 'POST' });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+      } catch (err) { alert(`Sprint ${action} failed: ${err.message}`); }
+    }
+
+    async function extendSprint(minutes) {
+      try {
+        const res = await fetch(`${API}/api/sprint/extend`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minutes }) });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j.error || `HTTP ${res.status}`);
+        }
+      } catch (err) { alert(`Extend failed: ${err.message}`); }
+    }
+
+    // Drive the Sprint panel from the live SSE `sprint` projection. Show/hide
+    // each control by status: pause(running), resume(paused), skip(running|
+    // winding-down), extend(running), stop(non-idle); start when idle/null.
+    function renderSprint(sprint) {
+      const statusEl = document.getElementById('sprint-status');
+      const show = (id, on) => { const el = document.getElementById(id); if (el) el.hidden = !on; };
+      const running = !!sprint && sprint.status === 'running';
+      const paused = !!sprint && sprint.status === 'paused';
+      const winding = !!sprint && sprint.status === 'winding-down';
+      const active = !!sprint && sprint.status !== 'idle';
+
+      show('sprint-start-btn', !active);
+      show('sprint-pause-btn', running);
+      show('sprint-resume-btn', paused);
+      show('sprint-skip-btn', running || winding);
+      show('sprint-extend-btn', running);
+      show('sprint-stop-btn', active);
+
+      if (!active) {
+        statusEl.textContent = 'No sprint running.';
+        return;
+      }
+      const cur = sprint.currentPhase || {};
+      statusEl.textContent = `${cur.label || ''} — ${Number(sprint.phaseIndex || 0) + 1}/${sprint.totalPhases || 1} (${sprint.status})`;
+    }
+
+    // Hydrate the panel once on load (the SSE stream then keeps it live).
+    (async function loadSprint() {
+      try {
+        const res = await fetch(`${API}/api/sprint`);
+        if (res.ok) { const j = await res.json(); renderSprint(j.sprint); }
+      } catch {}
+    })();
 
     function updateTimerClock() {
       const display = document.getElementById('timer-display');
