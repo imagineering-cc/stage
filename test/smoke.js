@@ -552,6 +552,7 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
     lastPlayedRequesterByVotes: { '0': null },
     timer: null,
     sprint: null,
+    shareQueue: [],
     event: null,
     mode: 'free-jukebox',
     visuals: normalizeVisuals({}),
@@ -579,6 +580,11 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
     ['timer.endsAt NaN', (d) => { d.timer = { id: 't', status: 'running', endsAt: NaN }; }, 'endsAt'],
     ['visuals.energy NaN', (d) => { d.visuals = { ...d.visuals, energy: NaN }; }, 'energy'],
     ['visuals.hue Infinity', (d) => { d.visuals = { ...d.visuals, hue: Infinity }; }, 'hue'],
+    // shareQueue (M2) write-side gate proves it rejects the SAME shapes the load
+    // side drops (#808 load/write symmetry for the new persisted field).
+    ['shareQueue not array', (d) => { d.shareQueue = 'nope'; }, 'shareQueue'],
+    ['shareQueue entry missing token', (d) => { d.shareQueue = [{ id: 'a', name: 'n', color: 'c', kind: 'share', projectTitle: '', requestedAt: 1, status: 'requested' }]; }, 'shareQueue'],
+    ['shareQueue entry bad status', (d) => { d.shareQueue = [{ id: 'a', token: 't', name: 'n', color: 'c', kind: 'share', projectTitle: '', requestedAt: 1, status: 'finished' }]; }, 'shareQueue'],
   ];
   for (const [label, mutate, field] of cases) {
     const d = goodBase();
@@ -902,4 +908,379 @@ test('sprint: a malformed persisted sprint degrades to idle without crashing', a
     if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ===========================================================================
+// MILESTONE 2 — phone-led share queue. These extend the shared server child.
+// Helpers: setConsent drives /api/profile (the only consent surface);
+// rawBody fetches a stream's first SSE frame as RAW TEXT (for the leak test —
+// a substring search is the strongest "absence-by-design, not by-accident").
+// ===========================================================================
+
+async function setConsent(token, { recording = false, research = false, title = 'Project', desc = 'desc' } = {}) {
+  return post('/api/profile', {
+    token,
+    projectTitle: title,
+    projectDescription: desc,
+    consentRecording: recording,
+    consentResearch: research,
+  });
+}
+
+// Read the first SSE frame as raw text (not parsed) so we can substring-search
+// for a token / transcript that must NOT appear.
+function rawSseFrame(streamPath) {
+  return new Promise((resolve, reject) => {
+    const http = require('node:http');
+    const r = http.get(BASE + streamPath, (res) => {
+      let buf = '';
+      res.on('data', (d) => {
+        buf += d.toString();
+        const i = buf.indexOf('\n\n');
+        if (i >= 0) { res.destroy(); resolve(buf.slice(0, i)); }
+      });
+      res.on('error', reject);
+    });
+    r.on('error', reject);
+    r.setTimeout(5000, () => { r.destroy(); reject(new Error('raw SSE timeout')); });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// M2-1. request -> admit -> ONLY-ADMITTED-streams (the core path + the gate).
+// ---------------------------------------------------------------------------
+test('share: request, admit, and ONLY the admitted token may stream transcript', async () => {
+  await openEvent('Share Core');
+  const A = (await join()).body;
+  const B = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await setConsent(B.token, { recording: true });
+
+  // A requests to share.
+  const reqA = await post('/api/share/request', { token: A.token, kind: 'share' });
+  assert.equal(reqA.status, 200, 'A can request to present (recording consent set)');
+  const idA = reqA.body.id;
+  assert.ok(idA, 'request returns an opaque id');
+
+  // Disk has one 'requested' entry for A's token.
+  let st = readState();
+  assert.equal(st.shareQueue.length, 1, 'one entry persisted');
+  assert.equal(st.shareQueue[0].token, A.token);
+  assert.equal(st.shareQueue[0].status, 'requested');
+
+  // Public projection shows the entry WITHOUT a token field, WITH the id.
+  let pub = await sseSnapshot('/api/events');
+  assert.equal(pub.shareQueue.length, 1, 'public stream carries the queue');
+  assert.ok(!('token' in pub.shareQueue[0]), 'public entry has NO token field');
+  assert.equal(pub.shareQueue[0].id, idA, 'public entry carries the opaque id');
+
+  // B requests too.
+  const reqB = await post('/api/share/request', { token: B.token, kind: 'progress' });
+  assert.equal(reqB.status, 200);
+  st = readState();
+  assert.equal(st.shareQueue.length, 2, 'queue now length 2');
+
+  // Host admits A — starts A's spotlight, A's entry -> admitted, public still tokenless.
+  const admit = await post('/api/share/admit', { token: A.token });
+  assert.equal(admit.status, 200, 'host admits A');
+  const show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.participantToken, A.token, 'A is the spotlight presenter');
+  const aEntry = show.shareQueue.find((e) => e.id === idA);
+  assert.equal(aEntry.status, 'admitted', "A's entry is admitted");
+  assert.equal(aEntry.token, A.token, 'SHOW projection carries the token for host controls');
+  pub = await sseSnapshot('/api/events');
+  assert.ok(pub.shareQueue.every((e) => !('token' in e)), 'public projection STILL has no token');
+
+  // A streams a transcript — accepted.
+  const okT = await post('/api/spotlight/transcript', { token: A.token, transcript: 'hello', isFinal: false });
+  assert.equal(okT.status, 200, "admitted A's transcript is accepted");
+
+  // B (NON-ADMITTED) tries to stream — REJECTED 403, transcript uncontaminated.
+  const hijack = await post('/api/spotlight/transcript', { token: B.token, transcript: 'hijack' });
+  assert.equal(hijack.status, 403, 'a non-admitted token is rejected (403)');
+  const show2 = await sseSnapshot('/api/show-events');
+  assert.equal(show2.spotlight.transcript, 'hello', "B's hijack did not contaminate the transcript");
+
+  // Missing token -> 401; never-minted token -> 401.
+  assert.equal((await post('/api/spotlight/transcript', { transcript: 'x' })).status, 401, 'missing token -> 401');
+  assert.equal((await post('/api/spotlight/transcript', { token: 'zzz', transcript: 'x' })).status, 401, 'unknown token -> 401');
+});
+
+// ---------------------------------------------------------------------------
+// M2-2. correction is a HARD gate on archive: finish before correct -> 409.
+// ---------------------------------------------------------------------------
+test('share: finish is hard-gated on the correction step', async () => {
+  await openEvent('Share Correct');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true, research: false });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/transcript', { token: A.token, transcript: 'helo wrld', isFinal: false });
+
+  const reportsBefore = (await get('/api/reports')).body.reports.length;
+
+  // Finish before the guest confirms -> 409, NO report archived.
+  const early = await post('/api/share/finish', { token: A.token });
+  assert.equal(early.status, 409, 'finish before correction is 409');
+  assert.equal((await get('/api/reports')).body.reports.length, reportsBefore, 'no report archived early');
+
+  // A confirms the corrected transcript.
+  const corr = await post('/api/spotlight/correct', { token: A.token, transcript: 'hello world' });
+  assert.equal(corr.status, 200, 'presenter can correct');
+  let show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.transcript, 'hello world', 'corrected text is live');
+  assert.equal(show.spotlight.isFinal, true);
+  assert.equal(show.spotlight.status, 'corrected');
+  const aEntry = show.shareQueue.find((e) => e.token === A.token);
+  assert.equal(aEntry.status, 'correcting', "A's entry is now correcting");
+
+  // A different (non-present) token cannot correct.
+  const B = (await join()).body;
+  await setConsent(B.token, { recording: true });
+  assert.equal((await post('/api/spotlight/correct', { token: B.token, transcript: 'x' })).status, 403, 'only the presenter may correct');
+
+  // Now finish succeeds, archives 'hello world' with the right eventId, clears
+  // the spotlight, and prunes A's entry.
+  const evtId = (await get('/api/event')).body.event.id;
+  const fin = await post('/api/share/finish', { token: A.token });
+  assert.equal(fin.status, 200, 'finish after correction succeeds');
+  const reports = (await get('/api/reports')).body.reports;
+  assert.ok(reports.length > reportsBefore, 'a report was archived');
+  assert.equal(reports[0].transcript, 'hello world', 'archived transcript is the corrected text');
+  assert.equal(reports[0].eventId, evtId, 'archived report carries the open event id');
+  show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight, null, 'spotlight cleared on finish');
+  assert.ok(!show.shareQueue.some((e) => e.token === A.token), "A's entry pruned (terminal)");
+  const st = readState();
+  assert.ok(!st.shareQueue.some((e) => e.token === A.token), 'disk shareQueue no longer contains A');
+});
+
+// ---------------------------------------------------------------------------
+// M2-3. finish/stop re-gate stale tokens; concurrent admit refused.
+// ---------------------------------------------------------------------------
+test('share: stale tokens re-gated after the turn ends; second concurrent admit refused', async () => {
+  await openEvent('Share Stale');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/correct', { token: A.token, transcript: 'done' });
+  await post('/api/share/finish', { token: A.token });
+
+  // After finish, A's transcript POST hits a cleared spotlight -> 409.
+  assert.equal((await post('/api/spotlight/transcript', { token: A.token, transcript: 'late' })).status, 409, 'stale token after finish -> 409');
+
+  // New turn: admit B, then STOP (not archived), B re-gated.
+  const B = (await join()).body;
+  await setConsent(B.token, { recording: true });
+  await post('/api/share/request', { token: B.token, kind: 'progress' });
+  await post('/api/share/admit', { token: B.token });
+  const reportsBefore = (await get('/api/reports')).body.reports.length;
+  const stop = await post('/api/share/stop');
+  assert.equal(stop.status, 200, 'host stops the live presenter');
+  let show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight, null, 'stop clears the spotlight');
+  assert.ok(!show.shareQueue.some((e) => e.token === B.token), "B's entry pruned on stop");
+  assert.equal((await get('/api/reports')).body.reports.length, reportsBefore, 'stop does NOT archive');
+  assert.equal((await post('/api/spotlight/transcript', { token: B.token, transcript: 'x' })).status, 409, 'stopped token -> 409');
+
+  // Second concurrent admit: admit B again, then try to admit C -> 409.
+  await post('/api/share/request', { token: B.token, kind: 'share' });
+  await post('/api/share/admit', { token: B.token });
+  const C = (await join()).body;
+  await setConsent(C.token, { recording: true });
+  await post('/api/share/request', { token: C.token, kind: 'share' });
+  const dup = await post('/api/share/admit', { token: C.token });
+  assert.equal(dup.status, 409, 'a second concurrent admit is refused (409)');
+  show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.participantToken, B.token, 'B remains the sole presenter');
+  await post('/api/share/stop'); // cleanup
+});
+
+// ---------------------------------------------------------------------------
+// M2-4. consent is preserved: no recording-consent -> request 409; no research-
+//       consent -> finish archives with insights:null (no research run).
+// ---------------------------------------------------------------------------
+test('share: consent gates are enforced server-side', async () => {
+  await openEvent('Share Consent');
+
+  // D has NO recording consent -> request rejected 409.
+  const D = (await join()).body;
+  await setConsent(D.token, { recording: false });
+  assert.equal((await post('/api/share/request', { token: D.token, kind: 'share' })).status, 409, 'no recording consent -> request 409');
+
+  // E has recording but NOT research consent -> finish archives, insights:null.
+  const E = (await join()).body;
+  await setConsent(E.token, { recording: true, research: false });
+  await post('/api/share/request', { token: E.token, kind: 'share' });
+  await post('/api/share/admit', { token: E.token });
+  await post('/api/spotlight/correct', { token: E.token, transcript: 'no research please' });
+  const fin = await post('/api/share/finish', { token: E.token });
+  assert.equal(fin.status, 200, 'finish succeeds without research consent');
+  const report = (await get('/api/reports')).body.reports[0];
+  assert.equal(report.transcript, 'no research please', 'transcript still archived');
+  assert.equal(report.insights, null, 'research skipped -> insights null');
+});
+
+// ---------------------------------------------------------------------------
+// M2-5. public stream leaks NO token and NO transcript; show stream DOES carry
+//       both (proving the split is real, not absence-by-accident).
+// ---------------------------------------------------------------------------
+test('share: public stream leaks no token/transcript; show stream carries both', async () => {
+  await openEvent('Share Leak');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/transcript', { token: A.token, transcript: 'secret transcript words', isFinal: false });
+
+  const pubRaw = await rawSseFrame('/api/events');
+  assert.ok(!pubRaw.includes(A.token), 'public stream does NOT contain the presenter token');
+  assert.ok(!pubRaw.includes('secret transcript words'), 'public stream does NOT contain the transcript');
+  assert.ok(!pubRaw.includes('participantToken'), 'public stream has no participantToken key');
+  const pubParsed = JSON.parse(pubRaw.slice('data: '.length));
+  assert.ok(pubParsed.shareQueue.every((e) => !('token' in e)), 'no token key in public shareQueue entries');
+
+  const showRaw = await rawSseFrame('/api/show-events');
+  assert.ok(showRaw.includes(A.token), 'show stream DOES contain the presenter token');
+  assert.ok(showRaw.includes('secret transcript words'), 'show stream DOES contain the transcript');
+  await post('/api/share/stop'); // cleanup
+});
+
+// ---------------------------------------------------------------------------
+// M2-6. wire is additive + version stays 1; all pre-existing top-level fields
+//       remain present and unchanged in shape.
+// ---------------------------------------------------------------------------
+test('share: wire is additive, version stays 1, prior fields intact', async () => {
+  await openEvent('Share Wire');
+  const pub = await sseSnapshot('/api/events');
+  assert.equal(pub.version, 1, 'protocol version stays 1');
+  assert.ok(Array.isArray(pub.shareQueue), 'shareQueue is an array');
+  for (const key of ['event', 'nowPlaying', 'queue', 'timer', 'mode', 'announcement', 'visuals', 'visualEvent', 'sprint']) {
+    assert.ok(key in pub, `pre-existing field "${key}" still present`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M2-7. malformed persisted shareQueue degrades (#808): garbage dropped, live
+//       states downgraded to 'requested', valid survives, no crash. Non-array -> [].
+// ---------------------------------------------------------------------------
+test('share: a malformed persisted shareQueue degrades without crashing', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-badshare-'));
+  const sf = path.join(dir, 'state.json');
+  fs.writeFileSync(sf, JSON.stringify({
+    identities: [], playHistory: [], queue: [], reports: [], eventsArchive: [],
+    lastPlayedRequesterByVotes: { '0': null },
+    timer: null, sprint: null,
+    shareQueue: [
+      { id: 'v1', token: 't-valid', name: 'Valid', color: 'c', kind: 'share', projectTitle: 'P', requestedAt: 1, status: 'requested' },
+      { id: 'bad', name: 'NoToken', color: 'c', kind: 'share', projectTitle: '', requestedAt: 1, status: 'requested' }, // garbage: no token
+      { id: 'a1', token: 't-admit', name: 'WasLive', color: 'c', kind: 'progress', projectTitle: 'Q', requestedAt: 2, status: 'admitted' }, // downgrade
+    ],
+    event: { id: 'evt-badshare', title: 'Bad Share', status: 'open', openedAt: 1, closedAt: null },
+    mode: 'free-jukebox', visuals: {},
+  }));
+
+  let boot;
+  try {
+    boot = await bootOnce(sf);
+    const base = `http://127.0.0.1:${boot.port}`;
+    // Server is up and serving (no crash).
+    const snap = await sseSnapshotAt(base, '/api/events');
+    assert.equal(snap.version, 1);
+    // garbage dropped; the live 'admitted' entry downgraded to 'requested'; valid survives.
+    const ids = snap.shareQueue.map((e) => e.id).sort();
+    assert.deepEqual(ids, ['a1', 'v1'], 'garbage entry dropped; valid + downgraded survive');
+    const downgraded = snap.shareQueue.find((e) => e.id === 'a1');
+    assert.equal(downgraded.status, 'requested', 'live entry downgraded to requested on boot (no dangling presenter)');
+    // room.spotlight is NOT resumed -> no dangling presenter.
+    const show = await sseSnapshotAt(base, '/api/show-events');
+    assert.equal(show.spotlight, null, 'no spotlight resumed for the downgraded presenter');
+
+    // Trigger a save (join) and confirm the rewritten file passes the gate.
+    await fetch(base + '/api/join', { method: 'POST' });
+    const persisted = JSON.parse(fs.readFileSync(sf, 'utf8'));
+    assert.equal(persisted.shareQueue.length, 2, 'only well-formed entries persisted');
+    assert.ok(persisted.shareQueue.every((e) => ['requested', 'admitted', 'correcting'].includes(e.status)), 'all persisted entries have a non-terminal status');
+  } finally {
+    if (boot && boot.child && !boot.child.killed) boot.child.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Separately: a non-array shareQueue degrades to [].
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-badshare2-'));
+  const sf2 = path.join(dir2, 'state.json');
+  fs.writeFileSync(sf2, JSON.stringify({
+    identities: [], playHistory: [], queue: [], reports: [], eventsArchive: [],
+    lastPlayedRequesterByVotes: { '0': null },
+    timer: null, sprint: null, shareQueue: 'not-an-array',
+    event: { id: 'evt-badshare2', title: 'Bad Share 2', status: 'open', openedAt: 1, closedAt: null },
+    mode: 'free-jukebox', visuals: {},
+  }));
+  let boot2;
+  try {
+    boot2 = await bootOnce(sf2);
+    const base = `http://127.0.0.1:${boot2.port}`;
+    const snap = await sseSnapshotAt(base, '/api/events');
+    assert.deepEqual(snap.shareQueue, [], 'non-array shareQueue degrades to []');
+    assert.ok((await fetch(base + '/api/config')).ok, 'server healthy after non-array shareQueue');
+  } finally {
+    if (boot2 && boot2.child && !boot2.child.killed) boot2.child.kill('SIGKILL');
+    fs.rmSync(dir2, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M2-8. event boundary clears the queue (open AND close) on disk and on the wire.
+// ---------------------------------------------------------------------------
+test('share: event boundary clears the queue', async () => {
+  await openEvent('Share Boundary');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  assert.equal((await sseSnapshot('/api/events')).shareQueue.length, 1, 'queue has an entry');
+
+  // Close clears it.
+  await closeEvent();
+  assert.deepEqual((await sseSnapshot('/api/events')).shareQueue, [], 'close clears the queue on the wire');
+  assert.deepEqual(readState().shareQueue, [], 'close clears the queue on disk');
+
+  // Open a fresh event: still empty, and a new request does not see old entries.
+  await openEvent('Share Boundary 2');
+  assert.deepEqual((await sseSnapshot('/api/events')).shareQueue, [], 'fresh event starts with an empty queue');
+});
+
+// ---------------------------------------------------------------------------
+// M2-regression: the LEGACY host-driven spotlight routes are reconciled with the
+// share queue so neither can orphan a queue entry. This is the MAJOR the
+// adversarial review found — two host control surfaces (legacy spotlight panel +
+// new admit/finish/stop) that did not reconcile.
+// ---------------------------------------------------------------------------
+test('share: legacy spotlight routes reconcile with the queue (no orphan entries)', async () => {
+  await openEvent('Reconcile Test');
+  const A = (await join()).body;
+  const B = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await setConsent(B.token, { recording: true });
+
+  // (1) legacy /api/spotlight/start must NOT silently steal a share-admitted
+  //     presenter's spotlight (the single-active invariant now covers it too).
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token }); // A is the live presenter
+  const overwrite = await post('/api/spotlight/start', { token: B.token, kind: 'introduction' });
+  assert.equal(overwrite.status, 409, 'legacy start cannot steal an active presenter');
+  let show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.participantToken, A.token, 'A is still the presenter after the blocked legacy start');
+
+  // (2) legacy /api/spotlight/end must PRUNE A's queue entry, not strand it.
+  const ended = await post('/api/spotlight/end', { token: A.token });
+  assert.equal(ended.status, 200);
+  show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight, null, 'spotlight cleared by legacy end');
+  assert.ok(!show.shareQueue.some((e) => e.token === A.token), "A's queue entry was pruned, not orphaned");
+  assert.ok(!(readState().shareQueue || []).some((e) => e.token === A.token), 'disk queue has no orphaned A');
+
+  // (3) the room is clean afterward: stop with nothing live is a graceful 409.
+  const stopClean = await post('/api/share/stop');
+  assert.equal(stopClean.status, 409, 'stop with no live presenter is a clean 409, not a crash');
 });

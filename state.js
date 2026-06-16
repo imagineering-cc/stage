@@ -157,6 +157,47 @@ function isValidSprintSession(s) {
   return true;
 }
 
+// A persisted share-queue entry is only well-formed if it carries the fields the
+// running code (and the write-side gate) require. SHARED by load-side hydration
+// and validateStateShape so the two can never disagree (the #808 lesson: anything
+// the gate rejects on write is dropped on read, so a lenient load can't feed
+// garbage to a strict write and crash-loop the appliance). A malformed entry is
+// dropped on load; a non-array shareQueue degrades to []. Only NON-TERMINAL
+// statuses ever persist — terminal entries are pruned at transition, so the
+// persisted set is exactly {requested, admitted, correcting}; a downgrade on boot
+// (see downgradeShareEntryOnBoot) collapses the two live states to 'requested'
+// because room.spotlight is not resumed across a restart.
+const SHARE_QUEUE_KINDS = new Set(['share', 'progress']);
+const SHARE_QUEUE_PERSISTED_STATUSES = new Set(['requested', 'admitted', 'correcting']);
+function isValidShareQueueEntry(e) {
+  if (!isPlainObject(e)) return false;
+  if (typeof e.id !== 'string' || e.id.length === 0) return false;
+  if (typeof e.token !== 'string' || e.token.length === 0) return false;
+  if (typeof e.name !== 'string') return false;
+  if (typeof e.color !== 'string') return false;
+  if (!SHARE_QUEUE_KINDS.has(e.kind)) return false;
+  if (typeof e.projectTitle !== 'string') return false;
+  if (!Number.isFinite(e.requestedAt)) return false;
+  if (!SHARE_QUEUE_PERSISTED_STATUSES.has(e.status)) return false;
+  return true;
+}
+
+// On boot, a live presenter dangles: room.spotlight is NOT resumed across a
+// restart (same policy as nowPlaying), so an 'admitted'/'correcting' entry would
+// reference a spotlight that no longer exists. Collapse both live states back to
+// 'requested' so the host can re-admit cleanly. Terminal entries never reach here
+// (pruned at transition, never persisted).
+function downgradeShareEntryOnBoot(e) {
+  if (e.status === 'admitted' || e.status === 'correcting') {
+    return { ...e, status: 'requested', admittedAt: null };
+  }
+  return e;
+}
+
+const shareQueue = Array.isArray(savedState.shareQueue)
+  ? savedState.shareQueue.filter(isValidShareQueueEntry).map(downgradeShareEntryOnBoot)
+  : []; // [{ id, eventId, token, name, color, kind, projectTitle, requestedAt, admittedAt, status }]
+
 // Reassigned scalars live on this single holder (see header note B).
 const room = {
   nowPlaying: null,           // { ...trackEntry } | null
@@ -167,6 +208,11 @@ const room = {
   visualEvent: null,          // short-lived phone gesture effect; never persisted
   spotlight: null,            // consented live speech transcript; archived only when explicitly ended
   sprint: isValidSprintSession(savedState.sprint) ? savedState.sprint : null, // autonomous sprint session | null (idle)
+  // Phone-led presentation queue (M2). Reference-stable: mutated in place via
+  // .push/.splice (a reassigned-let export would go stale in importers). Lives
+  // on `room` for cohesion with spotlight/timer/sprint but is mutated like the
+  // (A) containers. Scoped to the open event; cleared at every event boundary.
+  shareQueue,
 };
 
 // Module-private timeout handles (see header note about privacy).
@@ -271,6 +317,18 @@ function validateStateShape(d) {
     fail(why);
   }
 
+  // shareQueue: an array of well-formed non-terminal entries. Uses the SAME
+  // predicate the load side hydrates with (#808 symmetry): a persisted shape the
+  // gate would reject is loaded as dropped/[], so it can never reach here as
+  // garbage — but a save built from in-memory garbage IS rejected loudly, exactly
+  // like the other persisted fields. (Terminal-status entries are pruned at
+  // transition and never appear in room.shareQueue, so the persisted-status set
+  // the predicate enforces is the correct gate.)
+  if (!Array.isArray(d.shareQueue)) fail('shareQueue is not an array');
+  d.shareQueue.forEach((e, i) => {
+    if (!isValidShareQueueEntry(e)) fail(`shareQueue[${i}] is malformed (id/token/name/color/kind/projectTitle/requestedAt/status)`);
+  });
+
   if (d.event !== null && (typeof d.event !== 'object' || Array.isArray(d.event))) fail('event is not null or an object');
   if (d.event && typeof d.event.id !== 'string') fail('event.id is not a string');
 
@@ -307,6 +365,7 @@ function savePersistentState() {
     visuals: room.visuals,
     reports,
     sprint: room.sprint,
+    shareQueue: room.shareQueue,
     event: hooks.getEvent(),
     eventsArchive: hooks.getEventsArchive(),
   };
@@ -421,6 +480,39 @@ function publicSpotlight() {
 function hostSpotlight() {
   if (!room.spotlight) return null;
   return { ...publicSpotlight(), participantToken: room.spotlight.participantToken };
+}
+
+// --- share queue (phone-led presentation queue, M2) ---
+// The single source of truth for "who may speak" is room.spotlight.participantToken
+// (see GATING in routes.js); the share-queue entry is kept consistent with it but
+// is the host's view of the line. Projection mirrors the spotlight public/host
+// split: the PUBLIC wire NEVER carries `token` (the only auth secret on the entry),
+// so the guest finds ITS OWN row by the opaque `id` returned from /api/share/request.
+function shareQueueEntry(token) {
+  return room.shareQueue.find(e => e.token === token) || null;
+}
+
+// Remove a now-terminal entry from the live queue. The report (if any) lives in
+// the separate persisted reports[] via archiveSpotlight(), so pruning loses
+// nothing; only non-terminal entries ever persist, keeping the array lean.
+function pruneShareEntry(token) {
+  const i = room.shareQueue.findIndex(e => e.token === token);
+  if (i >= 0) room.shareQueue.splice(i, 1);
+}
+
+function shareQueueProjection(includeToken) {
+  return room.shareQueue.map(e => {
+    const base = {
+      id: e.id,                 // opaque per-request id; how a guest finds ITS OWN entry without seeing token
+      name: e.name,             // display-safe (snapshotted at request time)
+      color: e.color,           // display-safe
+      kind: e.kind,             // 'share' | 'progress'
+      projectTitle: e.projectTitle,
+      requestedAt: e.requestedAt,
+      status: e.status,         // 'requested' | 'admitted' | 'correcting'
+    };
+    return includeToken ? { ...base, token: e.token } : base; // PUBLIC omits token entirely
+  });
 }
 
 function rotateRequesterOrder(tokens, votes) {
@@ -583,6 +675,11 @@ module.exports = {
   publicQueue,
   publicSpotlight,
   hostSpotlight,
+  // share queue (M2)
+  isValidShareQueueEntry,
+  shareQueueEntry,
+  pruneShareEntry,
+  shareQueueProjection,
   sortQueue,
   recordPlay,
   // timer

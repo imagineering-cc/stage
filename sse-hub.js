@@ -23,6 +23,7 @@ const {
   currentAnnouncement,
   currentVisualEvent,
   hostSpotlight,
+  shareQueueProjection,
 } = state;
 
 // The snapshot every surface renders. Reads reassigned scalars off the `room`
@@ -45,8 +46,18 @@ function statePayload({ includeSpotlight = false } = {}) {
     // Autonomous sprint session projection, or null when idle. On BOTH streams:
     // phase/progress is shown on the TV, not private. Additive — version stays 1.
     sprint: sprint.sprintProjection(),
+    // Phone-led presentation queue (M2). Present on BOTH streams; the PUBLIC
+    // projection NEVER carries the presenter token (mirrors the spotlight split).
+    // [] when empty so consumers can .map/.length unconditionally. Additive.
+    shareQueue: shareQueueProjection(false),
   };
-  if (includeSpotlight) payload.spotlight = hostSpotlight();
+  if (includeSpotlight) {
+    payload.spotlight = hostSpotlight();
+    // SHOW stream: re-add the presenter token so the admin can drive admit/skip/
+    // finish. This is the ONLY place token reaches the wire, and /api/show-events
+    // is never public-proxied.
+    payload.shareQueue = shareQueueProjection(true);
+  }
   return payload;
 }
 

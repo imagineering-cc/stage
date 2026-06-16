@@ -392,6 +392,25 @@
       display: flex;
       flex-direction: column;
     }
+    #share-queue-block {
+      margin-top: 0.8rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.7rem;
+    }
+    #share-queue-list { display: flex; flex-direction: column; gap: 0.45rem; }
+    .share-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.6rem; padding: 0.4rem 0.5rem;
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+    .share-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; min-width: 0; }
+    .share-tag {
+      font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .share-proj { font-size: 0.78rem; color: var(--muted); flex-basis: 100%; }
+    .share-controls { display: flex; gap: 0.4rem; flex-shrink: 0; }
+    .share-controls button { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
     .reports-empty {
       color: var(--muted);
       font-size: 0.8rem;
@@ -676,6 +695,14 @@
     <div id="spotlight-status" role="status">No active spotlight.</div>
     <div id="spotlight-transcript" hidden></div>
     <div id="spotlight-insights" hidden></div>
+
+    <!-- M2: phone-led presentation queue. Participants request from their own
+         phones; the host admits/skips/stops/finishes here. -->
+    <div id="share-queue-block">
+      <h3 class="spotlight-subhead">Presentation queue</h3>
+      <div id="share-queue-list"><span class="reports-empty">No one waiting to present.</span></div>
+    </div>
+
     <div id="spotlight-reports">
       <h3 class="spotlight-subhead">Recent reports</h3>
       <div id="spotlight-reports-list"><span class="reports-empty">No reports yet.</span></div>
@@ -753,6 +780,7 @@
 	          if (Object.prototype.hasOwnProperty.call(state, 'spotlight')) {
 	            renderSpotlight(state.spotlight);
 	          }
+	          renderShareQueue(state.shareQueue || []);
 			        loadHistory();
 	      } catch {}
     };
@@ -1237,6 +1265,81 @@
       renderSpotlightAttendees();
       renderSpotlightStatus();
       updateSpotlightControls();
+    }
+
+    // ── M2: phone-led presentation queue (host side) ───────
+    // The SHOW stream carries the presenter token, so admit/skip/finish post it.
+    // Per-entry controls follow the status machine:
+    //   requested -> [Admit][Skip]; admitted -> [Stop]; correcting -> [Finish][Stop]
+    let shareBusy = false;
+    function renderShareQueue(list) {
+      const wrap = document.getElementById('share-queue-list');
+      if (!wrap) return;
+      const entries = Array.isArray(list) ? list : [];
+      wrap.textContent = '';
+      if (!entries.length) {
+        const empty = document.createElement('span');
+        empty.className = 'reports-empty';
+        empty.textContent = 'No one waiting to present.';
+        wrap.appendChild(empty);
+        return;
+      }
+      for (const e of entries) {
+        const row = document.createElement('div');
+        row.className = 'share-row';
+        const meta = document.createElement('div');
+        meta.className = 'share-meta';
+        const who = document.createElement('strong');
+        who.textContent = e.name || '(anon)';
+        if (e.color) who.style.color = e.color;
+        const tag = document.createElement('span');
+        tag.className = 'share-tag';
+        tag.textContent = `${e.kind === 'progress' ? 'progress' : 'share'} · ${e.status}`;
+        meta.appendChild(who);
+        meta.appendChild(tag);
+        if (e.projectTitle) {
+          const proj = document.createElement('span');
+          proj.className = 'share-proj';
+          proj.textContent = e.projectTitle;
+          meta.appendChild(proj);
+        }
+        const controls = document.createElement('div');
+        controls.className = 'share-controls';
+        const addBtn = (label, cls, fn) => {
+          const b = document.createElement('button');
+          b.className = cls;
+          b.textContent = label;
+          b.disabled = shareBusy;
+          b.addEventListener('click', fn);
+          controls.appendChild(b);
+        };
+        if (e.status === 'requested') {
+          addBtn('Admit', 'action-btn', () => shareAction('/api/share/admit', { token: e.token }));
+          addBtn('Skip', 'ghost-btn', () => shareAction('/api/share/skip', { token: e.token }));
+        } else if (e.status === 'admitted') {
+          addBtn('Stop', 'ghost-btn', () => shareAction('/api/share/stop', {}));
+        } else if (e.status === 'correcting') {
+          addBtn('Finish', 'action-btn', () => shareAction('/api/share/finish', { token: e.token }));
+          addBtn('Stop', 'ghost-btn', () => shareAction('/api/share/stop', {}));
+        }
+        row.appendChild(meta);
+        row.appendChild(controls);
+        wrap.appendChild(row);
+      }
+    }
+
+    async function shareAction(path, body) {
+      if (shareBusy) return;
+      shareBusy = true;
+      try {
+        await postSpotlight(path, body);   // reuse the host POST helper (same API base)
+      } catch (err) {
+        setSpotlightFeedback(`Queue action failed: ${err.message}`, true);
+        renderSpotlightStatus();
+      } finally {
+        shareBusy = false;
+        // The next SSE frame re-renders the queue with fresh statuses + enabled buttons.
+      }
     }
 
     function renderSpotlightStatus() {
