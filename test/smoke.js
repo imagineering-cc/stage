@@ -360,4 +360,19 @@ test('engine contract: versioned payload, documented keys, public/show spotlight
   const show = await sseSnapshot('/api/show-events');
   assert.equal(show.version, ENGINE_PROTOCOL_VERSION, 'show stream is versioned too');
   assert.ok('spotlight' in show, 'show stream includes the spotlight field');
+
+  // CORS: the read stream must be cross-origin readable so an off-origin
+  // frontend (native webOS app, separate dashboard) can open it. Without this,
+  // the "swappable frontends" contract only works for same-origin pages.
+  const acao = await new Promise((resolve, reject) => {
+    const http = require('node:http');
+    const r = http.get(BASE + '/api/events', (res) => {
+      const h = res.headers['access-control-allow-origin'];
+      res.destroy();
+      resolve(h);
+    });
+    r.on('error', reject);
+    r.setTimeout(5000, () => { r.destroy(); reject(new Error('CORS header probe timeout')); });
+  });
+  assert.equal(acao, '*', '/api/events must send Access-Control-Allow-Origin:* for off-origin frontends');
 });
