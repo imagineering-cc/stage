@@ -1249,3 +1249,38 @@ test('share: event boundary clears the queue', async () => {
   await openEvent('Share Boundary 2');
   assert.deepEqual((await sseSnapshot('/api/events')).shareQueue, [], 'fresh event starts with an empty queue');
 });
+
+// ---------------------------------------------------------------------------
+// M2-regression: the LEGACY host-driven spotlight routes are reconciled with the
+// share queue so neither can orphan a queue entry. This is the MAJOR the
+// adversarial review found — two host control surfaces (legacy spotlight panel +
+// new admit/finish/stop) that did not reconcile.
+// ---------------------------------------------------------------------------
+test('share: legacy spotlight routes reconcile with the queue (no orphan entries)', async () => {
+  await openEvent('Reconcile Test');
+  const A = (await join()).body;
+  const B = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await setConsent(B.token, { recording: true });
+
+  // (1) legacy /api/spotlight/start must NOT silently steal a share-admitted
+  //     presenter's spotlight (the single-active invariant now covers it too).
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token }); // A is the live presenter
+  const overwrite = await post('/api/spotlight/start', { token: B.token, kind: 'introduction' });
+  assert.equal(overwrite.status, 409, 'legacy start cannot steal an active presenter');
+  let show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.participantToken, A.token, 'A is still the presenter after the blocked legacy start');
+
+  // (2) legacy /api/spotlight/end must PRUNE A's queue entry, not strand it.
+  const ended = await post('/api/spotlight/end', { token: A.token });
+  assert.equal(ended.status, 200);
+  show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight, null, 'spotlight cleared by legacy end');
+  assert.ok(!show.shareQueue.some((e) => e.token === A.token), "A's queue entry was pruned, not orphaned");
+  assert.ok(!(readState().shareQueue || []).some((e) => e.token === A.token), 'disk queue has no orphaned A');
+
+  // (3) the room is clean afterward: stop with nothing live is a graceful 409.
+  const stopClean = await post('/api/share/stop');
+  assert.equal(stopClean.status, 409, 'stop with no live presenter is a clean 409, not a crash');
+});

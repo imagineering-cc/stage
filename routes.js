@@ -388,6 +388,13 @@ async function requestHandler(req, res) {
     if (id.consentRecording !== true) {
       return send(res, 409, { error: 'participant has not consented to live transcription/display' });
     }
+    // Single-active-presenter invariant — reconciles the legacy host-driven path
+    // with the M2 share queue. Without this, legacy start silently OVERWRITES a
+    // share-admitted presenter's spotlight and strands their queue entry. Mirror
+    // /api/share/admit's guard so the two control surfaces can't collide.
+    if (room.spotlight?.active && room.spotlight.participantToken !== body.token) {
+      return send(res, 409, { error: 'another participant is already presenting' });
+    }
     const kind = body.kind === 'progress' ? 'progress' : 'introduction';
     room.spotlight = {
       id: crypto.randomBytes(5).toString('hex'),
@@ -469,8 +476,14 @@ async function requestHandler(req, res) {
   }
 
   if (method === 'POST' && p === '/api/spotlight/end') {
+    // Reconcile with the share queue: if this spotlight belongs to a share-admitted
+    // presenter, prune their queue entry too, or the legacy End button strands it
+    // in 'admitted'/'correcting' with no live spotlight (host can't clear it).
+    const endedToken = room.spotlight?.participantToken;
     archiveSpotlight();
     room.spotlight = null;
+    if (endedToken) pruneShareEntry(endedToken);
+    savePersistentState();
     broadcast();
     return send(res, 200, { spotlight: null });
   }
@@ -593,9 +606,14 @@ async function requestHandler(req, res) {
   // host: stop the CURRENT live presenter (NOT archived). Global — no body token.
   // HOST-ONLY.
   if (method === 'POST' && p === '/api/share/stop') {
-    if (!room.spotlight?.active) return send(res, 409, { error: 'no active presenter' });
-    const token = room.spotlight.participantToken;
-    room.spotlight = null;
+    // Stop the live presenter. Tolerate a MISSING spotlight: if a queue entry was
+    // stranded 'admitted'/'correcting' (e.g. a legacy End cleared the spotlight
+    // out-of-band before this fix, or any future skew), the host must still be able
+    // to clear it. Fall back to the live queue entry when there's no spotlight.
+    const liveEntry = room.shareQueue?.find(e => e.status === 'admitted' || e.status === 'correcting');
+    const token = room.spotlight?.participantToken || liveEntry?.token;
+    if (!token) return send(res, 409, { error: 'no active presenter' });
+    if (room.spotlight) room.spotlight = null;
     pruneShareEntry(token);
     savePersistentState();
     broadcast();
