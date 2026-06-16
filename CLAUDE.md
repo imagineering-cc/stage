@@ -53,7 +53,7 @@ with swappable frontends, not a Pi-bound app.
 - ✅ Modular engine: `config`/`names`/`ytSearch`/`state`/`sse-hub`/`mpv`/`event-session`/`research`/`routes`, with `server.js` a 54-line composition root (shared mutable state owned by `state.js`; cross-module cycles broken by a late-bound `state.hooks` registry)
 - ✅ Zero-dep smoke harness (`test/smoke.js`, `node:test`) wired into CI — pins join-gating, event lifecycle, queue sort, vote toggle, spotlight eventId, and the engine wire contract
 - ✅ Versioned engine wire contract ([ENGINE.md](ENGINE.md)): `statePayload` carries `ENGINE_PROTOCOL_VERSION`; read streams send `Access-Control-Allow-Origin: *` so off-origin frontends can consume them
-- ✅ Native **LG webOS** room frontend (`webos/`) — a swappable frontend on the engine contract; verified rendering live state cross-origin (on-device LG TV install still pending hardware)
+- ✅ Native **LG webOS** room frontend (`webos/`) — a swappable frontend on the engine contract; verified rendering live state cross-origin (on-device LG TV install still pending hardware). Coequal with the Pi Chromium kiosk, not a replacement: both are independent SSE consumers, so run either or both per occasion (`systemctl --user stop/start stage-kiosk` toggles the kiosk). Both are *visual* only — audio always plays from the Pi's HDMI via `mpv` in `stage-server.service`. See [webos/README.md](webos/README.md).
 - ✅ Identity/project profiles, reports, visuals, history, waiting queue/votes, room phase, and timer state survive Node restarts
 - ✅ Systemd user services start the Stage server and TV kiosk at boot
 - ✅ Pi reachable from the public Caddy host over Tailscale
