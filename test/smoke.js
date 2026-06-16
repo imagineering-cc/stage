@@ -376,3 +376,28 @@ test('engine contract: versioned payload, documented keys, public/show spotlight
   });
   assert.equal(acao, '*', '/api/events must send Access-Control-Allow-Origin:* for off-origin frontends');
 });
+
+// ---------------------------------------------------------------------------
+// 7. visuals -> broadcast: a guest visual change mutates room state AND fans
+//    out on the public SSE stream. This pins the carved state.js -> sse-hub.js
+//    path (room holder write + broadcast) that no other test exercises and
+//    that the refactor review flagged as the one most likely to silently
+//    regress (the `room.visuals` reassigned-scalar must be read fresh by
+//    statePayload, not a stale destructured binding).
+// ---------------------------------------------------------------------------
+test('visuals -> broadcast: a guest visual change fans out over SSE', async () => {
+  await openEvent('Visuals Test');
+  const g = (await join()).body;
+
+  const res = await post('/api/visuals', { token: g.token, theme: 'nebula', energy: 0.9, complexity: 0.3, hue: 300 });
+  assert.equal(res.status, 200, 'visuals update accepted while open');
+  assert.equal(res.body.visuals.theme, 'nebula', 'route echoes the new theme');
+
+  // The change must be visible on the PUBLIC SSE stream — i.e. broadcast()
+  // re-projected room.visuals through statePayload (the carved seam).
+  const snap = await sseSnapshot('/api/events');
+  assert.equal(snap.visuals.theme, 'nebula', 'visuals theme change is broadcast over SSE');
+  assert.equal(snap.visuals.energy, 0.9, 'visuals energy change is broadcast');
+  assert.equal(snap.visuals.hue, 300, 'visuals hue change is broadcast');
+  assert.equal(snap.visuals.editedBy, g.name, 'broadcast carries who edited the visuals');
+});
