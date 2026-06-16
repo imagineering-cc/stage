@@ -20,13 +20,23 @@ egregores (see `../.claude/CLAUDE.md`). Stage is where the egregore
 *becomes physical* — where the shared vision takes on light and sound and
 shows the room what the room is doing.
 
-## Status (last touched 2026-05-27)
+## Status (last touched 2026-06-16)
 
 **Shipped its first show live during an Imagineering build-and-share meetup,
 2026-05-02 (sprint 4 of 4).** Strangers scanned QRs and queued tracks; music
 played through the TV; the room page glowed with the requesters' assigned
 colors. The audience was reportedly "super impressed." Nick rick-rolled himself
 on the API as a final test. It was a hell of a session.
+
+**Became an engine, 2026-06-16.** The single-file `server.js` (1147 lines, zero
+tests) was dissolved into nine focused, independently-testable modules under a
+zero-dep smoke harness, then the SSE payload that every surface already consumed
+was formalized as an explicit, versioned, CI-enforced **engine wire contract**
+([ENGINE.md](ENGINE.md)). The first proof followed immediately: a native **LG
+webOS** room frontend (`webos/`) that shares no code with the kiosk and renders
+the room purely by consuming `/api/events` over the network — verified rendering
+live production state cross-origin. Stage is now a reusable show-control engine
+with swappable frontends, not a Pi-bound app.
 
 **What works today:**
 
@@ -40,6 +50,10 @@ on the API as a final test. It was a hell of a session.
 - ✅ Host spotlight captures consented spoken intros/progress reports; live words drift across the TV and archived reports persist
 - ✅ Consented spotlight analysis searches opted-in public GitHub repositories plus arXiv/OpenAlex literature and presents questions/directions in a perspective crawl
 - ✅ Live updates everywhere via Server-Sent Events (zero npm dependencies on the server)
+- ✅ Modular engine: `config`/`names`/`ytSearch`/`state`/`sse-hub`/`mpv`/`event-session`/`research`/`routes`, with `server.js` a 54-line composition root (shared mutable state owned by `state.js`; cross-module cycles broken by a late-bound `state.hooks` registry)
+- ✅ Zero-dep smoke harness (`test/smoke.js`, `node:test`) wired into CI — pins join-gating, event lifecycle, queue sort, vote toggle, spotlight eventId, and the engine wire contract
+- ✅ Versioned engine wire contract ([ENGINE.md](ENGINE.md)): `statePayload` carries `ENGINE_PROTOCOL_VERSION`; read streams send `Access-Control-Allow-Origin: *` so off-origin frontends can consume them
+- ✅ Native **LG webOS** room frontend (`webos/`) — a swappable frontend on the engine contract; verified rendering live state cross-origin (on-device LG TV install still pending hardware)
 - ✅ Identity/project profiles, reports, visuals, history, waiting queue/votes, room phase, and timer state survive Node restarts
 - ✅ Systemd user services start the Stage server and TV kiosk at boot
 - ✅ Pi reachable from the public Caddy host over Tailscale
@@ -109,15 +123,17 @@ calibration). The collaboration was sharper for the friction.
         └────POST /api ───┘                 │
                   │                         │
             ┌─────▼─────────────────────────┴─────┐
-            │      Node server (server.js)        │
-            │   single file, zero npm deps        │
+            │   Node engine, zero npm deps        │
+            │   server.js = 54-line comp. root    │
             │   ┌─────────────────────────────┐   │
-	            │   │  persistent room state      │   │
-	            │   │  vote + fair queue ranking  │   │
-	            │   │  consent + research runner  │   │
-            │   │  ytSearch (yt-dlp child)     │   │
-            │   │  mpvController (JSON IPC)    │   │
-            │   │  sseHub (broadcast)          │   │
+	            │   │  state.js (room state nexus)│   │
+	            │   │  + persistence + fair queue │   │
+	            │   │  event-session.js (gating)  │   │
+            │   │  research.js (GH/arXiv/etc) │   │
+            │   │  mpv.js (JSON IPC)           │   │
+            │   │  sse-hub.js (broadcast)      │   │
+            │   │  ytSearch.js / names / config│   │
+            │   │  routes.js (HTTP dispatch)   │   │
             │   └─────────────────────────────┘   │
             └─────────────────┬───────────────────┘
                               │
@@ -136,16 +152,22 @@ calibration). The collaboration was sharper for the friction.
                   └───────────────────┘
 ```
 
-Three architectural choices worth defending:
+Architectural choices worth defending:
 
 - **SSE over WebSocket** — the server has zero npm deps. SSE is just
   long-lived HTTP. Auto-reconnect is built into `EventSource`. We're
   fan-out-only (server→clients); no need for bidi.
-- **Single-file server** — ~250 lines, easy to read end-to-end. Ages well for
-  a project with this scope.
-- **Three surfaces, one bus** — adding sprint mode means changing the
-  `{mode, nowPlaying, queue}` shape and rendering it three different ways. No
-  service-to-service plumbing.
+- **Modular engine, zero deps** — nine focused modules carved from the original
+  god file (under a smoke harness, one module per green commit). `state.js` owns
+  every shared mutable global; `sse-hub`/`mpv`/`research`/`routes` reach
+  `broadcast`/`playNext`/event-accessors through a late-bound `state.hooks`
+  registry wired by `server.js`'s composition root, which breaks the require
+  cycles without adding a dependency. See [ENGINE.md](ENGINE.md).
+- **The SSE payload IS the engine's public API** — `{version, event, nowPlaying,
+  queue, timer, mode, announcement, visuals, visualEvent, [spotlight]}` is a
+  versioned, CORS-open, CI-enforced wire contract. Any number of frontends
+  (guest PWA, admin, room TV, native webOS app) consume it and render N ways; no
+  service-to-service plumbing. Adding a show = adding fields, not services.
 - **Private speech stream** — `/api/events` is publicly proxied for guests, but
   transcripts, reports, research output, and host controls are available only
   on local/Tailscale `/api/show-events` and host routes.
@@ -233,13 +255,29 @@ the tailnet). The concrete address is in `ops/network.local.md`.
 
 ```
 stage/
-├── server.js          # Single-file Node server and persisted room state
+├── server.js          # 54-line composition root: wire hooks, boot mpv, listen
+├── config.js          # env-derived constants + ENGINE_PROTOCOL_VERSION
+├── state.js           # mutable-state nexus: room state, persistence, fair queue
+├── event-session.js   # host-controlled event lifecycle that gates participation
+├── sse-hub.js         # statePayload (the wire contract) + broadcast fan-out
+├── mpv.js             # mpv JSON-IPC + playNext
+├── research.js        # consented GitHub/arXiv/OpenAlex + spotlight facilitation
+├── ytSearch.js        # yt-dlp child for YouTube search
+├── names.js           # Dreamfinder handle generator
+├── routes.js          # HTTP dispatch + helpers + open-event guard
+├── ENGINE.md          # the engine wire-protocol contract (frontends code to this)
+├── test/
+│   └── smoke.js       # zero-dep behaviour + contract smoke suite (CI-enforced)
 ├── public/
 │   ├── index.html     # Guest PWA — project consent, visuals/shake, queue/vote
 │   ├── admin.html     # Host tool — QR, mode, timer, spotlight, reports, queue
-│   ├── room.html      # TV — Canvas visuals, transcript/crawl, clock, playback
+│   ├── room.html      # TV (Chromium kiosk) — Canvas visuals, clock, playback
 │   └── qrcode.min.js  # Vendored qrcode-generator (20KB, no CDN dep)
-├── ops/               # Systemd user units and Pi installer
+├── webos/             # native LG webOS room frontend (swappable, on ENGINE.md)
+│   ├── appinfo.json   # webOS app manifest
+│   ├── index.html     # self-contained TV room view + SSE client
+│   └── README.md      # package/install (ares-*) + engine-URL config
+├── ops/               # Systemd user units, Pi installer, provisioner
 ├── PLAN.md            # Product milestones and immediate implementation slice
 └── CLAUDE.md          # This file
 ```
