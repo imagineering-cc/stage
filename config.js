@@ -5,6 +5,14 @@
 
 const path = require('path');
 
+// Engine wire-protocol version — stamped onto every SSE statePayload so any
+// frontend (guest PWA, admin, room TV, and future native apps like webOS) can
+// detect a breaking change to the contract documented in ENGINE.md. Bump ONLY
+// on a breaking change (field removed/renamed, or semantics changed); additive
+// fields do NOT bump it. Frontends should warn — not hard-fail — on a higher
+// major than they know, so an updated engine degrades gracefully on old clients.
+const ENGINE_PROTOCOL_VERSION = 1;
+
 const PORT = Number(process.env.PORT || 3000);
 const MPV_SOCK = '/tmp/dreamfinder-mpv.sock';
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -20,6 +28,7 @@ const SHOW_MODES = new Set(['welcome', 'free-jukebox', 'sprint-build', 'sprint-s
 const VISUAL_THEMES = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
 
 module.exports = {
+  ENGINE_PROTOCOL_VERSION,
   PORT,
   MPV_SOCK,
   PUBLIC_DIR,

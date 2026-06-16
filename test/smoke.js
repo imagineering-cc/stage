@@ -63,10 +63,10 @@ function readState() {
 // `data: {json}\n\n` immediately on connect; we strip the `data: ` prefix and
 // parse, then close. This is the public playback/visual state (nowPlaying,
 // queue, event, ...).
-function sseSnapshot() {
+function sseSnapshot(streamPath = '/api/events') {
   return new Promise((resolve, reject) => {
     const http = require('node:http');
-    const r = http.get(BASE + '/api/events', (res) => {
+    const r = http.get(BASE + streamPath, (res) => {
       let buf = '';
       res.on('data', (d) => {
         buf += d.toString();
@@ -328,4 +328,36 @@ test('spotlight lifecycle: archived report carries the open event id', async () 
   const persisted = (st.reports || []).find((r) => r.id === report.id);
   assert.ok(persisted, 'report is persisted to disk');
   assert.equal(persisted.eventId, eventId, 'persisted report eventId matches the open event');
+});
+
+// ---------------------------------------------------------------------------
+// 6. engine wire-protocol contract (ENGINE.md): every payload carries the
+//    protocol `version`; the public stream exposes the documented top-level
+//    keys and OMITS the private `spotlight`; the show stream includes it.
+//    This pins the engine's public API so a frontend (incl. a future webOS
+//    app) has an enforced contract, not just prose.
+// ---------------------------------------------------------------------------
+test('engine contract: versioned payload, documented keys, public/show spotlight split', async () => {
+  const { ENGINE_PROTOCOL_VERSION } = require('../config');
+  await openEvent('Contract Test'); // populate event so the payload is fully shaped
+
+  const pub = await sseSnapshot('/api/events');
+
+  // The wire is versioned, and the wire version is the engine's constant.
+  assert.equal(typeof pub.version, 'number', 'payload carries a numeric protocol version');
+  assert.equal(pub.version, ENGINE_PROTOCOL_VERSION, 'wire version matches ENGINE_PROTOCOL_VERSION');
+
+  // Documented top-level keys are all present on the public stream.
+  const documented = ['version', 'event', 'nowPlaying', 'queue', 'timer', 'mode', 'announcement', 'visuals', 'visualEvent'];
+  for (const key of documented) {
+    assert.ok(key in pub, `public payload includes documented key "${key}"`);
+  }
+
+  // Privacy contract: the public stream MUST NOT carry the host-only spotlight.
+  assert.ok(!('spotlight' in pub), 'public stream omits the private spotlight field');
+
+  // The show stream carries the same shape PLUS spotlight (even when null).
+  const show = await sseSnapshot('/api/show-events');
+  assert.equal(show.version, ENGINE_PROTOCOL_VERSION, 'show stream is versioned too');
+  assert.ok('spotlight' in show, 'show stream includes the spotlight field');
 });
