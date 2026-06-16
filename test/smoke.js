@@ -600,6 +600,47 @@ test('validation: validateStateShape rejects each malformed field and accepts a 
 });
 
 // ---------------------------------------------------------------------------
+// 11b. boot sweeps ORPHAN per-pid tmp files but RETAINS the .corrupt sidecars.
+//      savePersistentState writes `${STATE_FILE}.${pid}.tmp` then atomically
+//      renames; a power-cut in the fsync->rename window strands that .tmp
+//      forever. The boot sweep must clear those (matched by `.<digits>.tmp`)
+//      WITHOUT touching the `.corrupt-<ts>-<pid>` quarantine sidecars (forensics)
+//      or the real state.json. Unit-level against the exported sweep (mirrors the
+//      validateStateShape unit test: throwaway STAGE_STATE_FILE + fresh require).
+// ---------------------------------------------------------------------------
+test('sweep: boot removes orphan .tmp files but keeps .corrupt sidecars and state.json', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-sweep-'));
+  const sf = path.join(dir, 'state.json');
+  process.env.STAGE_STATE_FILE = sf;
+
+  // Orphan tmp files from a DIFFERENT (dead) pid — must be swept.
+  fs.writeFileSync(`${sf}.99999.tmp`, 'interrupted write 1');
+  fs.writeFileSync(`${sf}.12345.tmp`, 'interrupted write 2');
+  // A .corrupt-* quarantine sidecar — forensics, must SURVIVE.
+  const corruptSidecar = `${sf}.corrupt-1700000000000-4242`;
+  fs.writeFileSync(corruptSidecar, 'preserved corrupt bytes');
+  // The real state file — must be untouched.
+  fs.writeFileSync(sf, JSON.stringify({ identities: [] }));
+
+  // Fresh require so config picks up the throwaway STAGE_STATE_FILE, then call
+  // the exported sweep directly (module load already calls it, but calling it
+  // explicitly pins the behaviour regardless of load-order timing).
+  delete require.cache[require.resolve('../config')];
+  delete require.cache[require.resolve('../state')];
+  const { sweepOrphanTmpFiles } = require('../state');
+  sweepOrphanTmpFiles();
+
+  assert.ok(!fs.existsSync(`${sf}.99999.tmp`), 'orphan tmp (pid 99999) is swept');
+  assert.ok(!fs.existsSync(`${sf}.12345.tmp`), 'orphan tmp (pid 12345) is swept');
+  assert.ok(fs.existsSync(corruptSidecar), '.corrupt-* quarantine sidecar is RETAINED');
+  assert.equal(fs.readFileSync(corruptSidecar, 'utf8'), 'preserved corrupt bytes', 'sidecar bytes untouched');
+  assert.ok(fs.existsSync(sf), 'real state.json is untouched');
+  assert.equal(fs.readFileSync(sf, 'utf8'), JSON.stringify({ identities: [] }), 'state.json bytes untouched');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
 // 12. valid-JSON-but-WRONG-TYPE on load is quarantined too. A state file that
 //     PARSES to a JSON array (or bare primitive) is corruption: the old loose
 //     `typeof === 'object'` test let an array straight through, and its original
