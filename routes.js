@@ -432,11 +432,16 @@ async function requestHandler(req, res) {
   }
 
   // Public SSE stream: deliberately excludes live transcripts and research.
+  // Access-Control-Allow-Origin:* lets an off-origin frontend (a native webOS TV
+  // app, a separate dashboard) open this stream — the engine contract's whole
+  // point (ENGINE.md). Safe: this is public, read-only data already proxied to
+  // the open internet. Same-origin frontends (the served PWA) are unaffected.
   if (method === 'GET' && p === '/api/events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
     });
     res.write(`data: ${JSON.stringify(statePayload())}\n\n`);
     const client = { res, includeSpotlight: false };
@@ -446,11 +451,15 @@ async function requestHandler(req, res) {
   }
 
   // Local room/admin stream. This must not be exposed through the public proxy.
+  // CORS-open too so a local off-origin frontend (e.g. a webOS app pointed at the
+  // Pi on the venue LAN) can read it; network exposure is still constrained by
+  // the proxy/firewall keeping this path off the public route, not by CORS.
   if (method === 'GET' && p === '/api/show-events') {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
     });
     res.write(`data: ${JSON.stringify(statePayload({ includeSpotlight: true }))}\n\n`);
     const client = { res, includeSpotlight: true };

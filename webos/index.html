@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1920, initial-scale=1" />
+<title>Stage — Room (webOS)</title>
+<!--
+  Stage room display as a NATIVE webOS TV app.
+
+  This is a swappable frontend that stands entirely on the engine's public wire
+  contract (../ENGINE.md): it opens the `/api/events` SSE stream, reads the
+  versioned `statePayload`, and renders the room on the TV. It shares NO code
+  with the Pi's Chromium-kiosk room.html — it is a second, independent consumer
+  of the same engine, which is the whole point of formalizing the contract.
+
+  Unlike the kiosk (which the Pi drives locally), this runs ON the LG TV and
+  reaches the engine over the network, so the Pi is the engine, not a display
+  driver.
+
+  Engine base URL resolution (first match wins):
+    1. ?engine=<url>           query param (handy for testing in a browser)
+    2. localStorage 'stage.engine'
+    3. ENGINE_BASE_DEFAULT below (the public Caddy proxy — works anywhere)
+  For a venue LAN, set it to the Pi directly, e.g. http://dreamfinder.lan:3000.
+  Note: a packaged webOS app is not an https origin, so http://<pi> is fine
+  (no mixed-content block); over the public proxy use https.
+-->
+<style>
+  :root {
+    --bg: #0b0f1a;
+    --fg: #f4f6fb;
+    --dim: #8a93a7;
+    --accent: #fbbf24;
+    /* TV overscan safe area — keep all content inside ~5% margins. */
+    --safe: 5vh;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    overflow: hidden;
+  }
+  #app {
+    position: absolute; inset: var(--safe);
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: 3vh;
+  }
+  /* header: event title + phase + connection */
+  header { display: flex; align-items: baseline; justify-content: space-between; }
+  #eventTitle { font-size: 3.4vh; font-weight: 700; letter-spacing: 0.01em; }
+  #phase {
+    font-size: 2vh; color: var(--bg); background: var(--accent);
+    padding: 0.4vh 1.4vh; border-radius: 999px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  #conn { font-size: 1.8vh; color: var(--dim); }
+  #conn.bad { color: #f87171; }
+
+  /* main: now-playing hero + queue */
+  main { display: grid; grid-template-columns: 1.6fr 1fr; gap: 4vh; min-height: 0; }
+
+  #now { display: flex; flex-direction: column; justify-content: center; gap: 2.4vh; min-width: 0; }
+  #nowLabel { font-size: 2vh; color: var(--dim); text-transform: uppercase; letter-spacing: 0.12em; }
+  #nowCard { display: flex; gap: 3vh; align-items: center; min-width: 0; }
+  #thumb {
+    width: 30vh; height: 22.5vh; flex: none; border-radius: 1.4vh;
+    background: #1a2030 center/cover no-repeat; box-shadow: 0 1vh 4vh rgba(0,0,0,.5);
+  }
+  #nowText { min-width: 0; }
+  #nowTitle {
+    font-size: 5vh; font-weight: 800; line-height: 1.05;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  #nowBy { margin-top: 1.4vh; font-size: 2.6vh; }
+  #nowBy b { color: var(--accent); }
+  #idle { font-size: 3.6vh; color: var(--dim); }
+
+  aside { display: flex; flex-direction: column; min-height: 0; }
+  #queueLabel { font-size: 2vh; color: var(--dim); text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 1.6vh; }
+  #queue { list-style: none; display: flex; flex-direction: column; gap: 1.2vh; overflow: hidden; }
+  #queue li { display: flex; align-items: center; gap: 1.6vh; font-size: 2.4vh; }
+  #queue .dot { width: 1.4vh; height: 1.4vh; border-radius: 50%; flex: none; }
+  #queue .t { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #queue .v { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #queueEmpty { color: var(--dim); font-size: 2.4vh; }
+
+  /* footer: timer + clock */
+  footer { display: flex; align-items: center; justify-content: space-between; }
+  #timer { font-size: 3vh; font-variant-numeric: tabular-nums; }
+  #timer .lab { color: var(--dim); font-size: 2vh; margin-right: 1.2vh; }
+  #timer.ended { color: var(--accent); font-weight: 800; }
+  #clock { font-size: 2.6vh; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  /* closed-room + version-warning overlays */
+  #closed, #verwarn { position: absolute; }
+  #closed {
+    inset: 0; display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 2vh; background: var(--bg); text-align: center;
+  }
+  #closed.show { display: flex; }
+  #closed h1 { font-size: 5vh; font-weight: 800; }
+  #closed p { font-size: 2.6vh; color: var(--dim); }
+  #verwarn {
+    top: 0; left: 50%; transform: translateX(-50%);
+    background: #7c2d12; color: #fff; font-size: 1.6vh; padding: 0.6vh 1.6vh;
+    border-radius: 0 0 1vh 1vh; display: none;
+  }
+  #verwarn.show { display: block; }
+</style>
+</head>
+<body>
+  <div id="verwarn"></div>
+  <div id="app">
+    <header>
+      <div id="eventTitle">Dreamfinder Stage</div>
+      <div style="display:flex; align-items:center; gap:2vh;">
+        <span id="phase">welcome</span>
+        <span id="conn">connecting…</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="now">
+        <div id="nowLabel">Now playing</div>
+        <div id="nowCard">
+          <div id="thumb"></div>
+          <div id="nowText">
+            <div id="nowTitle">—</div>
+            <div id="nowBy"></div>
+          </div>
+        </div>
+        <div id="idle" style="display:none">The room is quiet. Queue a track from your phone.</div>
+      </section>
+
+      <aside>
+        <div id="queueLabel">Up next</div>
+        <ul id="queue"></ul>
+        <div id="queueEmpty" style="display:none">Nothing queued yet.</div>
+      </aside>
+    </main>
+
+    <footer>
+      <div id="timer"></div>
+      <div id="clock"></div>
+    </footer>
+  </div>
+
+  <div id="closed">
+    <h1>The room is resting</h1>
+    <p>No event is running right now. Scan the QR to join when the next one opens.</p>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  // The protocol major this frontend was written against (../ENGINE.md).
+  var KNOWN_VERSION = 1;
+  var ENGINE_BASE_DEFAULT = 'https://imagineering.cc';
+
+  function resolveEngineBase() {
+    try {
+      var q = new URLSearchParams(location.search).get('engine');
+      if (q) { localStorage.setItem('stage.engine', q); return q.replace(/\/$/, ''); }
+      var saved = localStorage.getItem('stage.engine');
+      if (saved) return saved.replace(/\/$/, '');
+    } catch (e) { /* localStorage may be unavailable */ }
+    return ENGINE_BASE_DEFAULT;
+  }
+  var ENGINE = resolveEngineBase();
+
+  var $ = function (id) { return document.getElementById(id); };
+  function text(el, v) { if (el.textContent !== v) el.textContent = v; }
+
+  function fmtClock(ms) {
+    var d = new Date(ms);
+    var h = d.getHours(), m = d.getMinutes();
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  }
+  function fmtCountdown(ms) {
+    if (ms < 0) ms = 0;
+    var s = Math.floor(ms / 1000), m = Math.floor(s / 60);
+    s = s % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // --- render the engine payload (contract: ../ENGINE.md) ------------------
+  var lastTimer = null; // keep latest timer to tick the countdown between frames
+
+  function render(state) {
+    // version guard: warn (don't fail) on an engine newer than we know.
+    if (typeof state.version === 'number' && state.version > KNOWN_VERSION) {
+      var w = $('verwarn');
+      w.textContent = 'Engine protocol v' + state.version + ' — this display knows v' + KNOWN_VERSION + '. Some features may not show.';
+      w.classList.add('show');
+    }
+
+    // closed room: event === null is the canonical closed signal.
+    $('closed').classList.toggle('show', !state.event);
+    if (!state.event) { lastTimer = null; return; }
+
+    text($('eventTitle'), state.event.title || 'Dreamfinder Stage');
+    text($('phase'), state.mode || state.event.phase || 'welcome');
+
+    // now playing
+    var np = state.nowPlaying;
+    if (np) {
+      $('idle').style.display = 'none';
+      $('nowCard').style.display = 'flex';
+      text($('nowTitle'), np.title || '');
+      $('nowBy').innerHTML = 'by <b></b>';
+      $('nowBy').querySelector('b').textContent = np.requesterName || '';
+      $('thumb').style.background = np.thumbnail
+        ? "#1a2030 url('" + np.thumbnail + "') center/cover no-repeat"
+        : '#1a2030';
+      $('thumb').style.boxShadow = np.color ? '0 1vh 4vh ' + np.color + '55' : '';
+    } else {
+      $('nowCard').style.display = 'none';
+      $('idle').style.display = 'block';
+    }
+
+    // queue
+    var q = Array.isArray(state.queue) ? state.queue : [];
+    var ul = $('queue');
+    $('queueEmpty').style.display = q.length ? 'none' : 'block';
+    ul.innerHTML = '';
+    q.slice(0, 8).forEach(function (t) {
+      var li = document.createElement('li');
+      var dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = t.color || '#8a93a7';
+      var name = document.createElement('span'); name.className = 't'; name.textContent = t.title || '';
+      var votes = document.createElement('span'); votes.className = 'v'; votes.textContent = t.votes ? ('▲ ' + t.votes) : '';
+      li.appendChild(dot); li.appendChild(name); li.appendChild(votes);
+      ul.appendChild(li);
+    });
+
+    // timer
+    lastTimer = state.timer || null;
+    paintTimer();
+  }
+
+  function paintTimer() {
+    var el = $('timer');
+    if (!lastTimer) { el.textContent = ''; el.className = ''; return; }
+    if (lastTimer.status === 'ended') {
+      el.className = 'ended';
+      el.innerHTML = '<span class="lab">' + (lastTimer.label || 'Sprint') + '</span>TIME';
+    } else {
+      el.className = '';
+      var remaining = lastTimer.endsAt - Date.now();
+      el.innerHTML = '<span class="lab">' + (lastTimer.label || 'Sprint') + '</span>' + fmtCountdown(remaining);
+    }
+  }
+
+  // tick the clock + countdown locally between SSE frames (1s)
+  setInterval(function () { text($('clock'), fmtClock(Date.now())); paintTimer(); }, 1000);
+  text($('clock'), fmtClock(Date.now()));
+
+  // --- SSE connection with explicit reconnect status -----------------------
+  var es = null;
+  function connect() {
+    if (es) try { es.close(); } catch (e) {}
+    es = new EventSource(ENGINE + '/api/events');
+    es.onopen = function () { var c = $('conn'); c.textContent = ''; c.className = ''; };
+    es.onmessage = function (ev) {
+      try { render(JSON.parse(ev.data)); }
+      catch (e) { /* ignore a malformed frame; next one will be whole */ }
+    };
+    es.onerror = function () {
+      var c = $('conn'); c.textContent = '⟳ reconnecting…'; c.className = 'bad';
+      // EventSource auto-reconnects; this just surfaces the gap on the TV.
+    };
+  }
+  connect();
+
+  // webOS Back key (461) — let the platform close the app; nothing custom yet.
+  document.addEventListener('keydown', function (e) {
+    if (e.keyCode === 461 && window.webOS && window.webOS.platformBack) window.webOS.platformBack();
+  });
+})();
+</script>
+</body>
+</html>

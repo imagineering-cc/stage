@@ -44,6 +44,14 @@ writes the current snapshot, so a frontend never needs to poll.
 The only difference between the two is the private `spotlight` field. Everything
 else is identical.
 
+Both streams send `Access-Control-Allow-Origin: *`, so an **off-origin** frontend
+(a native webOS TV app, a separate dashboard) can open them directly — the engine
+serves public, read-only state here, so wildcard CORS is intentional. The
+same-origin served PWA is unaffected. (Cross-origin **writes** — guest action
+POSTs from a native app — are not yet CORS-enabled; that needs preflight handling
+and is a future step, tracked when a native *guest* frontend is built. The room
+*display* only reads, so the streams are enough.)
+
 ### Payload schema
 
 ```jsonc
