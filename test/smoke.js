@@ -779,6 +779,17 @@ test('sprint: autonomous advance off the timer-end path + host overrides', async
   const dup = await post('/api/sprint/start', { durations: [150] });
   assert.equal(dup.status, 409, 'a second start while running is a 409');
   await post('/api/sprint/stop');
+
+  // regression: a FINISHED session ('done') must allow an immediate fresh start.
+  // The done state holds for DONE_HOLD_MS before clearing to idle; during that
+  // window /api/sprint/start previously 409'd with a misleading "already running".
+  // Starting now must succeed (clearAllTimers cancels the pending done->idle hold).
+  await post('/api/sprint/start', { durations: [120], windDownMs: 80 });
+  await waitForSprint((s) => s && s.status === 'done');
+  const restart = await post('/api/sprint/start', { durations: [150] });
+  assert.equal(restart.status, 200, 'a new sprint starts immediately after one finishes (done state), not 409');
+  assert.equal(restart.body.sprint.status, 'running');
+  await post('/api/sprint/stop');
 });
 
 // ---------------------------------------------------------------------------

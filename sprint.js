@@ -319,7 +319,11 @@ function buildPlan({ plan, durations } = {}) {
 // ── host control transitions (each throws on a precondition violation; the
 //    route wraps the throw into a 409) ─────────────────────────────────────────
 function startSprint({ plan, durations, windDownMs: wdOverride } = {}) {
-  if (room.sprint && room.sprint.status !== 'idle') {
+  // Block only the genuinely-active states. A 'done' session is over — during its
+  // DONE_HOLD_MS hold-to-idle window the host may start a fresh session directly
+  // (clearAllTimers() below cancels the pending done->idle timeout). Throwing
+  // "already running" on a done session was both blocking and misleading.
+  if (room.sprint && ['running', 'winding-down', 'paused'].includes(room.sprint.status)) {
     throw new Error('a sprint session is already running; stop it first');
   }
   clearAllTimers();
