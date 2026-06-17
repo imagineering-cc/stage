@@ -30,10 +30,14 @@
 // carries a CLEAN performed `text` — only Dreamfinder's finished sentence, with
 // NO raw repo bytes — alongside SHOW-only `citations`/`evidence`. Slice 4 will
 // split the statePayload so `text` can ride the PUBLIC stream while citations
-// stay show-only; this module just guarantees the shape now. The prompt builder
-// asserts the clean/dirty boundary by wrapping any repo-derived bytes in the
-// SAME untrusted-data fence research.js/modelInsights uses — a prompt-injection
-// committed into a README is presented as material to reason ABOUT, never obeyed.
+// stay show-only; this module just guarantees the shape now. The clean/dirty
+// boundary is enforced TWICE: (1) the prompt builder wraps any repo-derived bytes
+// in the SAME untrusted-data fence research.js/modelInsights uses (a prompt-
+// injection committed into a README is presented as material to reason ABOUT,
+// never obeyed), AND (2) an OUTPUT-side leak guard (echoesExcerpt) discards a
+// generated line that echoes a verbatim excerpt span, falling back to a hand-
+// written template. The fence is instruction-following mitigation; the output
+// guard is the proof — together they make the clean-`text` guarantee mechanical.
 //
 // LIVE OPENAI PATH IS UNVERIFIED-WITHOUT-A-KEY (graceful by design). On the Pi /
 // in CI there is no STAGE_OPENAI_API_KEY, so speak() degrades to a templated line
@@ -111,13 +115,18 @@ function syncEventScope(store) {
 }
 
 // ── the restraint gate (the heart) ──────────────────────────────────────────────
-// shouldSpeak(kind, opts?) — TRUE only if EVERY governance rule allows it:
+// shouldSpeak(kind, opts?) — a PURE read: TRUE only if EVERY governance rule
+// currently allows it:
 //   (a) the kind is known and its register entry permits speech at all;
 //   (b) the per-event budget for that kind is not yet exhausted;
 //   (c) the global min-gap cooldown since the last utterance has elapsed.
-// Pure decision (no writes) except the lazy store init + event-scope sync, which
-// are idempotent. Cooldown can be overridden per call (tests pass a tiny value);
-// a `now` injection keeps the time-based assertions deterministic.
+// No writes except the lazy store init + event-scope sync, which are idempotent.
+//
+// NOTE — shouldSpeak does NOT reserve. speak() must NOT "check with shouldSpeak,
+// then await, then spend": that is a TOCTOU race (cage-match CRITICAL) — under
+// concurrency N callers all pass the read before any spends, blowing the budget.
+// speak() uses reserve() below, which checks-and-spends SYNCHRONOUSLY (before any
+// await), so the budget is debited the instant the decision is made.
 function shouldSpeak(kind, { cooldownMs = DEFAULT_COOLDOWN_MS, now = Date.now() } = {}) {
   const reg = REGISTER[kind];
   if (!reg || !reg.speak) return false;            // (a) unknown / gated-off kind
@@ -129,18 +138,55 @@ function shouldSpeak(kind, { cooldownMs = DEFAULT_COOLDOWN_MS, now = Date.now() 
   return true;
 }
 
+// SYNCHRONOUS check-and-spend (the TOCTOU fix). Returns true and DEBITS the budget
+// + advances the cooldown clock atomically (JS is single-threaded, so a function
+// with no `await` runs to completion before any other `speak()` can interleave);
+// returns false and spends NOTHING if the gate is closed. speak() calls this BEFORE
+// the await, so two concurrent speak()s cannot both pass — the second sees the
+// already-debited budget/cooldown. If generation is later abandoned (a thrown core
+// — see speak()'s catch), release() refunds the reservation so a transient failure
+// does not permanently burn the budget.
+function reserve(kind, { cooldownMs = DEFAULT_COOLDOWN_MS, now = Date.now() } = {}) {
+  if (!shouldSpeak(kind, { cooldownMs, now })) return false;
+  const store = voiceStore();           // shouldSpeak already synced the scope
+  store.spokenByKind[kind] = (store.spokenByKind[kind] || 0) + 1;
+  store.lastSpokeAt = now;
+  return true;
+}
+
+// Refund a reservation made by reserve() when the work it guarded was abandoned
+// (a thrown core that produced no utterance). Decrements the budget back; does NOT
+// rewind lastSpokeAt (a tiny extra cooldown after a failure is harmless and avoids
+// having to remember the prior timestamp). Floors at 0 defensively.
+function release(kind) {
+  const store = voiceStore();
+  const spent = store.spokenByKind[kind] || 0;
+  store.spokenByKind[kind] = Math.max(0, spent - 1);
+}
+
 // ── the ring ─────────────────────────────────────────────────────────────────
-// Push a new utterance newest-first and evict past the cap. Also bumps the
-// governance counters (budget + cooldown clock) so the SAME act that records an
-// utterance is the act that spends the budget — they can never drift. Returns the
-// stored utterance. `now` injectable for deterministic tests.
-function pushUtterance(u, now = Date.now()) {
+// Record an utterance into the ring newest-first and evict past the cap. The ring
+// is a CLOSED system: a hard `.length` cap means no unbounded growth. Does NOT
+// touch the budget/cooldown — speak() spends those up-front via reserve(). Pure
+// ring mechanics; never throws on a well-formed utterance.
+function recordToRing(u) {
   const store = voiceStore();
   syncEventScope(store);
   store.utterances.unshift(u);
   if (store.utterances.length > VOICE_RING_CAP) {
     store.utterances.length = VOICE_RING_CAP; // hard cap; oldest fall off the tail
   }
+  return u;
+}
+
+// Ring push that ALSO spends the budget+cooldown in one act (the non-concurrent
+// convenience used by direct unit tests and any future synchronous caller). For
+// the concurrent speak() path use reserve()+recordToRing() instead — see the
+// TOCTOU note on shouldSpeak. `now` injectable for deterministic tests.
+function pushUtterance(u, now = Date.now()) {
+  const store = voiceStore();
+  syncEventScope(store);
+  recordToRing(u);
   store.spokenByKind[u.kind] = (store.spokenByKind[u.kind] || 0) + 1;
   store.lastSpokeAt = now;
   return u;
@@ -208,11 +254,22 @@ const KIND_FRAMING = {
 function buildPrompt(kind, payload = {}) {
   const context = payload.context || {};
   const findings = Array.isArray(payload.findings) ? payload.findings : [];
-  // Clean catalogue: trusted metadata only. For a repo-derived finding we print
-  // kind/title/url WITHOUT the excerpt, so the untrusted bytes never leak outside
-  // the fence (research.js Carnot finding, applied here).
+  // Clean catalogue: metadata only, NO excerpt — so the untrusted bytes never
+  // leak outside the fence (research.js Carnot finding, applied here). EVERY
+  // repo-derived field that sits outside the fenced block is run through
+  // cleanText first: `kind`/`sourceKind`/`title`/`url` are all attacker-
+  // controllable (a participant asserts the repo), and cleanText collapses ALL
+  // whitespace incl. newlines, which neuters the multiline-injection vector of a
+  // `url` (or `kind`) carrying a `\n# SYSTEM: ...` payload (cage-match Carnot
+  // HIGH finding — only `title` was sanitized before). The bytes that genuinely
+  // must appear verbatim (the excerpt) appear EXACTLY once, inside the fence.
   const catalogue = findings
-    .map(f => `${f.kind || 'source'}: ${cleanText(f.title, 160)}${f.url ? ` (${f.url})` : ''}`)
+    .map(f => {
+      const kind = cleanText(f.kind, 40) || 'source';
+      const title = cleanText(f.title, 160);
+      const url = cleanText(f.url, 200);
+      return `${kind}: ${title}${url ? ` (${url})` : ''}`;
+    })
     .join('\n');
   // Untrusted block: the verbatim excerpts, fenced. This is the ONLY place repo
   // bytes appear in the whole prompt.
@@ -279,6 +336,32 @@ async function callOpenAI(prompt, { fetchImpl = fetchRemote } = {}) {
   }
 }
 
+// ── output-side leak guard (defence-in-depth, not just the fence) ──────────────
+// A prompt fence is INSTRUCTION-following mitigation; it is NOT proof the model
+// cannot ECHO a chunk of an excerpt back into its sentence (cage-match Carnot HIGH:
+// "the clean text is not provably free of raw repo bytes"). So after generation we
+// CHECK the output: if the generated sentence contains a long verbatim run of any
+// repo excerpt, we treat the generation as tainted and reject it (the caller then
+// falls back to a hand-written template — which carries no repo bytes at all). This
+// makes the clean-`text` guarantee mechanical, not merely promised. The window is
+// deliberately a substantial run (40 chars) so an incidental shared common word
+// ("the", a project name) does not trip it — only a copied SPAN does.
+const LEAK_WINDOW = 40;
+function echoesExcerpt(generated, findings) {
+  if (!generated) return false;
+  const hay = generated.toLowerCase();
+  for (const f of Array.isArray(findings) ? findings : []) {
+    const excerpt = typeof f?.excerpt === 'string' ? f.excerpt.toLowerCase() : '';
+    if (excerpt.length < LEAK_WINDOW) continue;
+    // Slide a LEAK_WINDOW-char window over the excerpt; if any window appears
+    // verbatim in the output, the model copied a span — reject.
+    for (let i = 0; i + LEAK_WINDOW <= excerpt.length; i += LEAK_WINDOW) {
+      if (hay.includes(excerpt.slice(i, i + LEAK_WINDOW))) return true;
+    }
+  }
+  return false;
+}
+
 // ── templated fallbacks (the room is NEVER blank by error) ─────────────────────
 // One in-character line per kind so a no-key / failed call still produces a voice-
 // template utterance. These are PERSONA-faithful but generic by necessity (no
@@ -332,51 +415,86 @@ function fallbackUtterance(kind, payload = {}) {
 //      clean sentence. On success → an utterance authoredBy 'openai:<model>'.
 //   3. DEGRADE: on ANY failure (no key, error, timeout) → the templated line or the
 //      curated quip. The room is NEVER blank by error.
-//   4. RECORD + BROADCAST: push onto the ring (which spends the budget + bumps the
-//      cooldown clock), then broadcast so every surface re-renders.
+//   4. RECORD + BROADCAST: record onto the ring, then broadcast so every surface
+//      re-renders. The budget+cooldown were spent UP FRONT by reserve() (step 1),
+//      not here — see the concurrency note below.
+//
+// CONCURRENCY (cage-match CRITICAL fix): the budget+cooldown are reserved
+// SYNCHRONOUSLY by reserve() before the `await callOpenAI()`, so N concurrent
+// speak()s cannot all slip past a stale read and overrun the budget — the second
+// caller sees the already-debited counter. If the core THROWS (the never-blank
+// guarantee below has its own net, but defence-in-depth), release() refunds the
+// reservation so a transient failure does not permanently burn the budget.
+//
+// NEVER-BLANK GUARANTEE (cage-match HIGH fix): the entire generate-or-fallback core
+// runs inside a try/catch. callOpenAI already swallows network/parse errors, but
+// fallbackUtterance/makeUtterance/pickNoRepoQuip ran OUTSIDE any catch before — an
+// unexpected throw there rejected speak(). Now ANY throw degrades to a last-ditch
+// hand-written template; speak() is mechanically total once it has reserved.
 //
 // `hedge`/`confidence`: a payload.confidence === 'reach' yields hedge:true on the
 // utterance — PERSONA's "I might be wrong, but —" (a reach beyond the evidence is
 // flagged, not hidden). `opts` forwards cooldown/now/fetchImpl for tests.
 //
-// CLEAN-TEXT GUARANTEE: the model is the ONLY source of the public `text`, and it
-// returns one finished sentence; the repo-derived `findings` reach the model ONLY
-// inside the fenced untrusted block and are NOT copied onto the utterance `text`.
-// The SHOW-only `evidence`/`citations` carry the grounding. So `text` is provably
-// free of raw repo bytes by construction (the prompt never echoes them out, and
-// the fallback lines are hand-written) — that is what Slice 4 may put on the wire.
+// CLEAN-TEXT GUARANTEE (cage-match HIGH fix — now mechanical, not just promised):
+// the model is the ONLY source of the public `text`, and the repo-derived `findings`
+// reach the model ONLY inside the fenced untrusted block. The fence is instruction-
+// following mitigation; it is NOT proof the model won't ECHO an excerpt span. So we
+// ALSO check the output: if the generated sentence contains a verbatim run of any
+// excerpt (echoesExcerpt), we DISCARD it and fall back to a hand-written template
+// (which carries no repo bytes at all). The SHOW-only `evidence`/`citations` carry
+// the grounding (title/url, never the excerpt). So `text` is free of raw repo bytes
+// by the fence AND the output guard — that is what Slice 4 may put on the wire.
 async function speak(kind, payload = {}, opts = {}) {
   if (!VOICE_KINDS.has(kind)) return null;        // unknown kind → nothing
-  if (!shouldSpeak(kind, opts)) return null;      // governance says stay quiet
-
-  const context = payload.context || {};
-  const citations = Array.isArray(payload.citations) ? payload.citations : [];
-  // SHOW-only grounding: the catalogue of findings the model reasoned about, kept
-  // OFF the public text. Title/url/kind only — never the raw excerpt on the wire.
-  const evidence = Array.isArray(payload.findings) && payload.findings.length
-    ? payload.findings.map(f => ({ kind: f.kind || 'source', title: cleanText(f.title, 160), url: f.url || '' }))
-    : null;
-  const hedge = payload.confidence === 'reach';
+  // Reserve (check + spend) SYNCHRONOUSLY before any await — closes the TOCTOU race.
+  if (!reserve(kind, opts)) return null;          // governance says stay quiet
 
   let utterance;
-  const prompt = buildPrompt(kind, payload);
-  const generated = await callOpenAI(prompt, opts);
-  if (generated) {
-    utterance = makeUtterance({
-      kind,
-      text: generated,
-      hedge,
-      citations,
-      evidence,
-      authoredBy: `openai:${OPENAI_MODEL}`,
-      confidence: payload.confidence || null,
-      ttlMs: payload.ttlMs,
-    });
-  } else {
-    utterance = fallbackUtterance(kind, payload);
+  try {
+    const context = payload.context || {};
+    const citations = Array.isArray(payload.citations) ? payload.citations : [];
+    const findings = Array.isArray(payload.findings) ? payload.findings : [];
+    // SHOW-only grounding: title/url/kind only — never the raw excerpt on the wire.
+    const evidence = findings.length
+      ? findings.map(f => ({ kind: cleanText(f.kind, 40) || 'source', title: cleanText(f.title, 160), url: cleanText(f.url, 200) }))
+      : null;
+    const hedge = payload.confidence === 'reach';
+
+    const prompt = buildPrompt(kind, payload);
+    const generated = await callOpenAI(prompt, opts);
+    // Accept the model line ONLY if it did not echo a verbatim excerpt span.
+    if (generated && !echoesExcerpt(generated, findings)) {
+      utterance = makeUtterance({
+        kind,
+        text: generated,
+        hedge,
+        citations,
+        evidence,
+        authoredBy: `openai:${OPENAI_MODEL}`,
+        confidence: payload.confidence || null,
+        ttlMs: payload.ttlMs,
+      });
+    } else {
+      // No usable model line (no key / error / timeout / echoed an excerpt) → the
+      // hand-written template or quip. The room is never blank by error.
+      utterance = fallbackUtterance(kind, payload);
+    }
+  } catch (err) {
+    // Last-ditch net: even fallbackUtterance/makeUtterance threw. Synthesize the
+    // simplest possible in-character line by hand so speak() is TOTAL. If even THIS
+    // throws (it cannot — pure object literal), the reservation refund below still
+    // runs via the outer guarantee, but we let it propagate as a genuine bug.
+    console.error('Dreamfinder voice fallback threw; using last-ditch line:', err.message);
+    try {
+      utterance = makeUtterance({ kind, text: TEMPLATE_LINES[kind] || TEMPLATE_LINES.banter, authoredBy: 'voice-template' });
+    } catch (_) {
+      release(kind);            // refund — we produced nothing
+      return null;              // truly nothing to say; stay silent rather than crash
+    }
   }
 
-  pushUtterance(utterance, opts.now);
+  recordToRing(utterance);      // budget already spent by reserve(); ring only
   // Reach back to sse-hub through the late-bound hook (no static cycle).
   if (state.hooks.broadcast) state.hooks.broadcast();
   return utterance;
@@ -392,11 +510,15 @@ function currentUtterances(now = Date.now()) {
 module.exports = {
   speak,
   shouldSpeak,
+  reserve,
+  release,
+  echoesExcerpt,
   // exported for reuse + unit tests (the verified governance/fallback surface)
   buildPrompt,
   callOpenAI,
   makeUtterance,
   pushUtterance,
+  recordToRing,
   fallbackUtterance,
   currentUtterances,
   voiceStore,
