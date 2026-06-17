@@ -52,6 +52,15 @@ jobs:
         # so a refactor that breaks one turns CI red. STAGE_NO_AUDIO skips mpv.
         run: STAGE_NO_AUDIO=1 node test/smoke.js
 
+      - name: Reader unit tests
+        # The Reader (reader.js) — agentic-Claude repo read. These pin the pure,
+        # deterministic logic (defensive JSON parse, the ANTHROPIC_API_KEY cost
+        # assertion, the clean-env allowlist, path-escape rejection, size cap,
+        # timeout->SIGKILL via a FAKE claude binary, temp-dir wipe, concurrency).
+        # CI CANNOT run real `claude`; the live-model gate is an on-Pi observation
+        # run by hand (see the PR description). Zero-dep node:test.
+        run: node --test test/reader.test.js
+
   # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
   # validation passed — so untrusted PR code never reaches the Pi, and broken
   # code never gets deployed.
