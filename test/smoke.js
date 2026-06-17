@@ -1328,12 +1328,14 @@ test('share: legacy spotlight routes reconcile with the queue (no orphan entries
 
 // ===========================================================================
 // GUARDED-MUTATION API (#11 / task #837). Validation gates the MUTATION, not just
-// serialization: a request that would produce invalid persisted state is rejected
-// at the route boundary (4xx) with room AND disk unchanged and nothing broadcast.
-// This is the regression lock for the memory/disk divergence #808 left open
-// (mutate -> broadcast bad state -> save skipped -> disk keeps last-good -> reboot
-// time-travels). /api/mode is the proof vehicle: it routes through commit() with NO
-// pre-check, so a bad mode flows THROUGH the rollback path end to end over HTTP.
+// serialization: a request that would produce invalid persisted state never reaches
+// disk or the wire. /api/mode rejects a bad mode with a precise SHOW_MODES pre-check
+// (a clean 400 before any mutation) AND routes the valid change through commit() as
+// the structural backstop — so this test pins the OBSERVABLE property (bad request ->
+// room AND disk unchanged) at the route, while the commit() unit below proves the
+// rollback machinery itself. Together they lock the memory/disk divergence #808 left
+// open (mutate -> broadcast bad state -> save skipped -> disk keeps last-good -> reboot
+// time-travels) shut from both ends.
 // ===========================================================================
 test('guarded mutation: an invalid /api/mode is rejected at the route, room + disk unchanged', async () => {
   await openEvent('Guarded Mode Test');
@@ -1345,13 +1347,14 @@ test('guarded mutation: an invalid /api/mode is rejected at the route, room + di
   assert.equal((await sseSnapshot('/api/events')).mode, 'sprint-build', 'wire reflects the good mode');
   assert.equal(readState().mode, 'sprint-build', 'disk reflects the good mode');
 
-  // The bad request: a mode outside SHOW_MODES. It is applied to room.mode INSIDE
-  // commit(), validateStateShape throws, commit rolls back, the route returns 400.
+  // The bad request: a mode outside SHOW_MODES. The pre-check returns 400 before any
+  // mutation; commit() would also reject + roll back if the pre-check were bypassed
+  // (proven by the commit() unit below). Either way: nothing is mutated or broadcast.
   const bad = await post('/api/mode', { mode: 'totally-not-a-mode' });
   assert.equal(bad.status, 400, 'an invalid mode is rejected at the route (400)');
 
   // THE PROPERTY: room unchanged (wire still shows the good mode) AND disk
-  // unchanged (last-good preserved) — the rollback left both exactly as they were.
+  // unchanged (last-good preserved) — the rejected request left both untouched.
   assert.equal((await sseSnapshot('/api/events')).mode, 'sprint-build', 'room mode UNCHANGED after the rejected mutation');
   assert.equal(readState().mode, 'sprint-build', 'disk mode UNCHANGED after the rejected mutation');
 

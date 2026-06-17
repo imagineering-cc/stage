@@ -127,7 +127,17 @@ function gateAdmittedPresenter(res, body) {
 function guardedMutate(res, mutator) {
   try { commit(mutator); return true; }
   catch (err) {
-    send(res, 422, { error: 'change rejected: would produce invalid room state', detail: err.message });
+    // Distinguish the two failure modes commit() can throw (both leave room rolled
+    // back): a validateStateShape rejection is a BAD REQUEST (422 — the proposed
+    // change would produce invalid state), whereas a writeSnapshot I/O failure is a
+    // SERVER error (500 — the change was valid but couldn't be persisted). Blanketing
+    // both as 422 would mislabel a disk failure as the client's fault.
+    const isValidation = /\[STATE VALIDATION\]/.test(err.message);
+    if (isValidation) {
+      send(res, 422, { error: 'change rejected: would produce invalid room state', detail: err.message });
+    } else {
+      send(res, 500, { error: 'state could not be persisted', detail: err.message });
+    }
     return false;
   }
 }
@@ -279,10 +289,10 @@ async function requestHandler(req, res) {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
-    markAttendance(id);
     if (body.type !== 'shake') return send(res, 400, { error: 'unknown gesture' });
     const lastAt = gestureTimes.get(body.token) || 0;
     if (Date.now() - lastAt < 900) return send(res, 429, { error: 'shake too frequent' });
+    markAttendance(id); // only after the gesture is accepted — a rejected shake leaves no attendance tick
     gestureTimes.set(body.token, Date.now());
     room.visualEvent = {
       id: crypto.randomBytes(4).toString('hex'),
@@ -534,14 +544,15 @@ async function requestHandler(req, res) {
     if (id.consentRecording !== true) {
       return send(res, 409, { error: 'recording consent is required to present' });
     }
-    markAttendance(id);
     const kind = body.kind === 'progress' ? 'progress' : 'share';
     const existing = shareQueueEntry(body.token);
     if (existing) {
       // Idempotent re-request: update the kind on a still-queued 'requested'
       // entry; reject a duplicate while they're already live (admitted/correcting).
+      // markAttendance lives INSIDE the guard (and only on the success branch) so
+      // the 'already presenting' 409 below leaves no attendance tick behind.
       if (existing.status === 'requested') {
-        if (!guardedMutate(res, () => { existing.kind = kind; })) return;
+        if (!guardedMutate(res, () => { markAttendance(id); existing.kind = kind; })) return;
         broadcast();
         return send(res, 200, { id: existing.id, status: existing.status });
       }
@@ -559,7 +570,7 @@ async function requestHandler(req, res) {
       admittedAt: null,
       status: 'requested',
     };
-    if (!guardedMutate(res, () => { room.shareQueue.push(entry); })) return;
+    if (!guardedMutate(res, () => { markAttendance(id); room.shareQueue.push(entry); })) return;
     broadcast();
     return send(res, 200, { id: entry.id, status: entry.status });
   }
