@@ -844,6 +844,128 @@
       from { transform: rotateX(9deg) translateY(18px); }
       to { transform: rotateX(9deg) translateY(calc(-100% - 80px)); }
     }
+    #facilitation-card {
+      top: auto;
+      right: 34px;
+      bottom: 34px;
+      left: 34px;
+      width: auto;
+      max-height: 42vh;
+    }
+  }
+
+  /* ─── FACILITATION (M3): one host-asked question card ──────
+     Renders ONLY when spotlight.facilitation.status === 'asked'.
+     A single evidence-anchored card — NOT the legacy crawl feed. */
+  #facilitation-card {
+    position: absolute;
+    z-index: 5;
+    top: 104px;
+    right: 54px;
+    bottom: 50px;
+    display: none;
+    flex-direction: column;
+    gap: 18px;
+    width: clamp(360px, 39vw, 640px);
+    padding: 4px 30px;
+    color: rgba(237,244,250,0.96);
+    overflow-y: auto;
+  }
+  #spotlight-overlay.has-facilitation #research-crawl { display: none !important; }
+  #spotlight-overlay.has-facilitation #facilitation-card { display: flex; }
+  .facil-label {
+    color: var(--spotlight-color);
+    font-size: 12px;
+    font-weight: 750;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+  /* Provenance ribbons. */
+  .facil-ribbon {
+    align-self: flex-start;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .facil-ribbon.ai {
+    background: rgba(244,180,60,0.16);
+    border: 1px solid rgba(244,180,60,0.55);
+    color: rgb(248,200,110);
+  }
+  .facil-ribbon.no-sources {
+    background: rgba(244,120,60,0.14);
+    border: 1px solid rgba(244,120,60,0.5);
+    color: rgb(248,170,120);
+  }
+  /* The focal question band — points back at named evidence via accent. */
+  .facil-question {
+    position: relative;
+    padding: 18px 22px;
+    border-left: 4px solid var(--spotlight-color);
+    border-radius: 0 12px 12px 0;
+    background: linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.01));
+    color: rgba(248,250,253,0.98);
+    font-size: clamp(22px, 2.0vw, 34px);
+    font-weight: 620;
+    line-height: 1.3;
+  }
+  .facil-question.quip {
+    border-left-color: rgba(180,200,255,0.6);
+    font-style: italic;
+    font-weight: 540;
+  }
+  .facil-interpretation {
+    color: rgba(240,244,250,0.82);
+    font-size: clamp(16px, 1.3vw, 21px);
+    font-weight: 500;
+    line-height: 1.42;
+  }
+  .facil-connections {
+    margin: 0;
+    padding-left: 20px;
+    color: rgba(240,244,250,0.78);
+    font-size: clamp(15px, 1.2vw, 19px);
+    line-height: 1.4;
+  }
+  .facil-connections li { margin-bottom: 8px; }
+  /* Compact attributed citation strip — sids in evidenceIds get the accent dot. */
+  .facil-citations {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255,255,255,0.14);
+  }
+  .facil-cite {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 15px;
+    line-height: 1.3;
+  }
+  .facil-cite-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    margin-top: 5px;
+    border-radius: 50%;
+    background: rgba(240,240,245,0.28);
+  }
+  .facil-cite.evidence .facil-cite-dot { background: var(--spotlight-color); }
+  .facil-cite-title {
+    color: rgba(246,248,252,0.92);
+    font-weight: 600;
+  }
+  .facil-cite.evidence .facil-cite-title { color: var(--spotlight-color); }
+  .facil-cite-host {
+    color: rgba(240,240,245,0.5);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
   }
 
   /* ─── TIMER ───────────────────────────────────────────── */
@@ -1229,6 +1351,7 @@
       <div id="research-track"></div>
     </div>
   </aside>
+  <aside id="facilitation-card" aria-label="Dreamfinder's question"></aside>
 </div>
 
 <div id="timer-panel" aria-live="off">
@@ -1271,6 +1394,7 @@
   let spotlightSession = '';
   let spotlightTranscript = '';
   let spotlightInsightFingerprint = '';
+  let facilitationFingerprint = '';
   let spokenQuestionFingerprint = '';
   let spokenWordIndex = 0;
   let seenVisualEventId = null;
@@ -1337,6 +1461,7 @@
   const spotlightTranscriptEl = document.getElementById('spotlight-transcript');
   const spokenWords = document.getElementById('spoken-words');
   const researchTrack = document.getElementById('research-track');
+  const facilitationCard = document.getElementById('facilitation-card');
   const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   let reducedMotion = reducedMotionQuery.matches;
 
@@ -2041,7 +2166,21 @@
     researchTrack.appendChild(group);
   }
 
-  function renderResearchCrawl(insights) {
+  // Legacy crawl is fully superseded by the gated facilitation card. Whenever a
+  // spotlight carries `facilitation` at all (any status, incl. research/null/
+  // dismissed), the crawl must NOT render — otherwise an un-updated path could
+  // double-render the question alongside the new card. One surface only.
+  function renderResearchCrawl(insights, hasFacilitation) {
+    if (hasFacilitation) {
+      spotlightOverlay.classList.remove('has-research');
+      researchTrack.replaceChildren();
+      spotlightInsightFingerprint = '';
+      return;
+    }
+    renderResearchCrawlInner(insights);
+  }
+
+  function renderResearchCrawlInner(insights) {
     const clean = insights && typeof insights === 'object' ? insights : {};
     const questions = Array.isArray(clean.questions) ? clean.questions.filter(Boolean).slice(0, 5).map((text) => String(text).slice(0, 240)) : [];
     const directions = Array.isArray(clean.directions) ? clean.directions.filter(Boolean).slice(0, 5).map((text) => String(text).slice(0, 240)) : [];
@@ -2091,11 +2230,142 @@
     researchTrack.style.setProperty('--crawl-duration', `${Math.min(58, Math.max(24, 18 + entryCount * 4))}s`);
   }
 
+  // M3 trust boundary (render side): show ONE evidence-anchored question card
+  // ONLY when facilitation.status === 'asked', reading the frozen `asked`
+  // candidate. status 'research'/'dismissed'/null → render NOTHING (and clear
+  // any prior card). A proposed/research question must never reach the TV
+  // before the host lets it through.
+  function renderFacilitationCard(facil) {
+    const asked = (facil && facil.status === 'asked') ? facil.asked : null;
+    // Render-dedupe fingerprint is CONTENT-derived, not askedAt-derived: the
+    // backend freezes `asked` at ask time and always mints a fresh askedAt, so
+    // today an askedAt change and a content change are 1:1 — but keying on
+    // content removes the coupling entirely (a hypothetical same-askedAt content
+    // edit, or a missing/empty askedAt, can never strand a stale card or a
+    // never-rendered one). Sentinel '∅' marks "no card" so a real askedAt of 0
+    // or an empty payload can't collide with it. (cage-match Carnot finding.)
+    const fingerprint = asked
+      ? JSON.stringify([facil.authoredBy, facil.askedAt, asked.kind, asked.primaryQuestion,
+          asked.quip, asked.interpretation, asked.connections, asked.citations, asked.evidenceIds])
+      : '∅';
+    // The question band and its cited evidence dots share the spotlight hue
+    // (var(--spotlight-color)) so they visibly point at each other.
+    spotlightOverlay.classList.toggle('has-facilitation', Boolean(asked));
+    if (fingerprint === facilitationFingerprint) return;
+    facilitationFingerprint = fingerprint;
+    facilitationCard.replaceChildren();
+    if (!asked) return;
+
+    const isQuip = asked.kind === 'quip' || facil.authoredBy === 'dreamfinder-quip';
+    const authoredBy = String(facil.authoredBy || '');
+    const isModel = authoredBy.startsWith('openai:');
+    // Filter empties: a blank sid must never earn the evidence accent (this is
+    // trust-boundary UI; a malformed id can't masquerade as cited evidence).
+    const evidenceIds = (Array.isArray(asked.evidenceIds) ? asked.evidenceIds : [])
+      .map(String).filter(Boolean);
+    const citations = Array.isArray(asked.citations) ? asked.citations.slice(0, 6) : [];
+
+    const label = document.createElement('div');
+    label.className = 'facil-label';
+    label.textContent = isQuip ? 'Dreamfinder wonders' : 'Dreamfinder asks';
+    facilitationCard.appendChild(label);
+
+    // Provenance ribbons. Model-authored → amber "verify"; a model question
+    // with NO retrieved evidence → an explicit "no sources" caveat (the
+    // model-as-fact guard). Evidence-template → neutral, no ribbon.
+    if (isModel) {
+      const ribbon = document.createElement('div');
+      ribbon.className = 'facil-ribbon ai';
+      ribbon.textContent = 'AI-authored — verify';
+      facilitationCard.appendChild(ribbon);
+    }
+    if (isModel && !isQuip && evidenceIds.length === 0) {
+      const caveat = document.createElement('div');
+      caveat.className = 'facil-ribbon no-sources';
+      caveat.textContent = 'No sources retrieved';
+      facilitationCard.appendChild(caveat);
+    }
+
+    const q = document.createElement('div');
+    q.className = isQuip ? 'facil-question quip' : 'facil-question';
+    q.textContent = String(isQuip ? (asked.quip || '') : (asked.primaryQuestion || '')).slice(0, 280);
+    facilitationCard.appendChild(q);
+
+    // Quip is a light, clearly-playful wink — no analysis, no citations.
+    if (isQuip) return;
+
+    const interp = String(asked.interpretation || '').trim();
+    if (interp) {
+      const el = document.createElement('p');
+      el.className = 'facil-interpretation';
+      el.textContent = interp.slice(0, 300);
+      facilitationCard.appendChild(el);
+    }
+
+    const connections = (Array.isArray(asked.connections) ? asked.connections : [])
+      .filter(Boolean).slice(0, 2).map((t) => String(t).slice(0, 200));
+    if (connections.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'facil-connections';
+      for (const c of connections) {
+        const li = document.createElement('li');
+        li.textContent = c;
+        ul.appendChild(li);
+      }
+      facilitationCard.appendChild(ul);
+    }
+
+    // Compact attributed citation strip. Citations whose sid is in evidenceIds
+    // get the accent dot/colour matching the question band — the room can
+    // inspect what evidence informed the question.
+    if (citations.length) {
+      const strip = document.createElement('div');
+      strip.className = 'facil-citations';
+      for (const c of citations) {
+        const sid = String(c && c.sid || '');
+        const isEvidence = evidenceIds.includes(sid);
+        const row = document.createElement('div');
+        row.className = isEvidence ? 'facil-cite evidence' : 'facil-cite';
+        const dot = document.createElement('span');
+        dot.className = 'facil-cite-dot';
+        row.appendChild(dot);
+        const body = document.createElement('div');
+        const title = document.createElement('span');
+        title.className = 'facil-cite-title';
+        title.textContent = String((c && c.title) || 'Reference').slice(0, 140);
+        body.appendChild(title);
+        const hostText = String((c && c.host) || '').trim();
+        if (hostText) {
+          const host = document.createElement('span');
+          host.className = 'facil-cite-host';
+          host.textContent = ' · ' + hostText.replace(/^www\./, '').slice(0, 60);
+          body.appendChild(host);
+        }
+        row.appendChild(body);
+        strip.appendChild(row);
+      }
+      facilitationCard.appendChild(strip);
+    }
+  }
+
+  // M3 trust boundary: the room speaks Dreamfinder's question ONLY once the
+  // host has let it through (facilitation.status === 'asked'). While 'research'
+  // (still reading source), 'dismissed' (host vetoed), or null → SILENCE.
+  // We read facilitation.asked (the FROZEN candidate), never insights.questions.
+  // The spoken-dedupe is keyed on askedAt so a host "another" re-roll — same
+  // spotlight, new asked question, new askedAt — is re-spoken, not de-duped.
   function speakSpotlightQuestion(next) {
-    const question = next?.isFinal && Array.isArray(next.insights?.questions)
-      ? String(next.insights.questions[0] || '').trim()
-      : '';
-    const fingerprint = `${next?.id || ''}|${question}`;
+    const facil = next?.facilitation;
+    if (!facil || facil.status !== 'asked' || !facil.asked) return;
+    const asked = facil.asked;
+    const question = String(
+      asked.kind === 'quip' ? (asked.quip || '') : (asked.primaryQuestion || '')
+    ).trim();
+    // Re-key on askedAt so a host "another" re-roll (new askedAt) re-speaks while
+    // an identical re-delivery stays silent. The `a:` prefix + question fallback
+    // means a (contractually-shouldn't-happen) missing askedAt can't collide with
+    // the empty-string initial fingerprint and silently mute an asked question.
+    const fingerprint = `a:${facil.askedAt || ''}|${question}`;
     if (!question || fingerprint === spokenQuestionFingerprint || timerState || announcementState) return;
     if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') return;
     spokenQuestionFingerprint = fingerprint;
@@ -2118,9 +2388,12 @@
       spotlightSession = '';
       spotlightTranscript = '';
       spotlightInsightFingerprint = '';
+      facilitationFingerprint = '';
       spokenQuestionFingerprint = '';
       spotlightOverlay.classList.remove('has-research');
+      spotlightOverlay.classList.remove('has-facilitation');
       researchTrack.replaceChildren();
+      facilitationCard.replaceChildren();
       clearSpokenWords();
       return;
     }
@@ -2132,6 +2405,7 @@
       clearSpokenWords();
       spotlightTranscript = '';
       spotlightInsightFingerprint = '';
+      facilitationFingerprint = '';
     }
     spotlightSession = session;
     spotlightKind.textContent = next.kind === 'introduction' ? 'Introduction spotlight' : 'Progress spotlight';
@@ -2139,7 +2413,9 @@
     spotlightProject.textContent = String(next.projectTitle || '').slice(0, 150);
     spotlightStatus.textContent = String(next.status || (next.isFinal ? 'Final' : 'Live')).slice(0, 24);
     spotlightTranscriptEl.textContent = transcriptCaption(transcript);
-    renderResearchCrawl(next.insights);
+    const hasFacilitation = Boolean(next.facilitation);
+    renderResearchCrawl(next.insights, hasFacilitation);
+    renderFacilitationCard(next.facilitation);
     speakSpotlightQuestion(next);
     animateSpokenWords(getArrivingWords(spotlightTranscript, transcript));
     spotlightTranscript = transcript;

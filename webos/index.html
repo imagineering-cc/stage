@@ -17,6 +17,17 @@
   reaches the engine over the network, so the Pi is the engine, not a display
   driver.
 
+  M3 facilitation trust boundary — NOTHING TO GATE HERE, ON PURPOSE.
+  Dreamfinder's autonomous question (spotlight.facilitation) is a
+  *show-stream-only* field on the private /api/show-events stream (ENGINE.md
+  "Facilitation (M3)": the public /api/events payload is byte-identical to
+  pre-M3). This webOS app consumes ONLY /api/events, so the facilitation
+  candidate/question physically never reaches it. The trust boundary that
+  room.html enforces in JS (render/speak only when status==='asked') is, for
+  webOS, enforced one layer stronger — by stream choice: the data isn't on the
+  wire it reads. If this app is ever pointed at /api/show-events, it MUST adopt
+  room.html's status==='asked' gate before rendering or speaking any question.
+
   Engine base URL resolution (first match wins):
     1. ?engine=<url>           query param (handy for testing in a browser)
     2. localStorage 'stage.engine'
