@@ -31,12 +31,20 @@ function colorForName(name) {
 // wrote them. `{name}` is interpolated with the presenter's display handle.
 // Picked at random at runtime (pickNoRepoQuip) — Math.random is fine here: this is
 // product surface (a quip), not a workflow harness where determinism matters.
+//
+// VOICE (see PERSONA.md): the joke is ALWAYS on Dreamfinder's own blindness, never
+// the builder. Warm, self-deprecating, a wink — not analysis. Each lands on a
+// universal coding truth (the recognition laugh) and ends in a gentle nudge toward
+// open source ("open it and I'll bring proof"). His register: the Victorian familiar
+// who reads the grimoire of your code and collects its sparks.
 const NO_REPO_QUIPS = [
-  "I can't see {name}'s code, so I'm flying entirely blind here — but in my experience the bug is always hiding in the part you're proudest of. Was I close? I can't tell. That's the whole problem.",
-  "No repo to peer into, so I'll dead-reckon it: somewhere in there is a function that does six things and is named handleData. I will not be taking questions, because I have no evidence.",
-  "{name}'s repo is private, so this isn't a code review — it's a horoscope. I foresee a config file no one fully understands, and a test marked skip 'just for now', months ago. Push it public and I'll trade the crystal ball for facts.",
-  "Working purely from vibes, since the source is sealed to me. Vibes report: the demo works, and you don't entirely know why. Open it up and I'll bring receipts instead of vibes.",
-  "I have zero visibility into this codebase, which has never once stopped me from having opinions. My guess: there's a // TODO: fix later from a while back that is now quietly load-bearing.",
+  "Alas, {name} keeps their workshop locked, so I'm dreaming blind — but my instincts say there's a `// TODO` in there, older than it admits, quietly holding the roof up. Open the doors sometime and I'll bring proof instead of poetry.",
+  "{name}'s repo stays sealed to me, so this is a horoscope, not a reading: I foresee a config nobody fully understands, and a test marked skip 'just for now' — a now that was months ago. Unlock the grimoire and I'll trade omens for facts.",
+  "The source is shut to me, so I'm running on pure vibes, and the vibes are clear: it works, and {name} is not entirely sure why. Show me the code and I'll turn that mystery into a question worth asking.",
+  "I can't see a single line, so I'm dreaming blind — but a familiar learns one thing early: the bug always hides in the part you're proudest of. Am I right? Neither of us can tell. That is the tragedy of a locked door.",
+  "No visibility into {name}'s work, which has never once stopped me from having opinions. Open it up and I'll upgrade the opinion to an insight — I do my best work with the lights on.",
+  "Blind as I am to {name}'s repo, I'll still wager there's one function in there doing the work of six, with a name that admits to none of it. Prove me wrong — truly, I would love to be proven wrong.",
+  "Every locked repo is a spark I can see glowing but can't quite catch, and {name}'s is glowing rather brightly. A pity. Crack it open sometime and it goes in the jar with the rest.",
 ];
 
 // Pick one quip and interpolate the presenter's display name. Pure aside from the
