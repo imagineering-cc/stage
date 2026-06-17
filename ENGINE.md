@@ -259,9 +259,12 @@ return **404** on the public proxy by design (like `/api/timer/*`). See
 
 ### State integrity — the guarded-mutation boundary
 
-Every route that mutates **persisted, request-driven** room state does so inside
-`state.commit(mutator)`, which **validates the proposed result before it can
-persist or broadcast**:
+Every route that mutates **persisted, request-driven** room state **inline** does
+so inside `state.commit(mutator)`, which **validates the proposed result before it
+can persist or broadcast**. (Routes that delegate to a self-persisting helper —
+`startTimer`/`clearTimer`, the `sprint.*` controls, event `open`/`close` — are the
+carve-out below; they build state valid-by-construction and persist through
+`savePersistentState`'s degrade-not-crash net.)
 
 ```
 snapshot persisted state → run mutator (in place) → validateStateShape(result)

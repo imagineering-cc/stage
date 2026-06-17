@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { JOIN_URL, PUBLIC_DIR } = require('./config');
+const { JOIN_URL, PUBLIC_DIR, SHOW_MODES } = require('./config');
 const {
   room,
   identities,
@@ -296,20 +296,18 @@ async function requestHandler(req, res) {
     return send(res, 200, { ok: true, visualEvent: room.visualEvent });
   }
 
-  // admin: set the room's current show phase. The guarded-mutation boundary IS
-  // the validity gate here: commit() applies the change, validateStateShape
-  // rejects a mode outside SHOW_MODES, and the rollback restores room.mode — so
-  // a bad mode flows THROUGH the guard (mutate -> reject -> roll back -> 400)
-  // with room and disk provably unchanged and nothing broadcast. Same observable
-  // behavior as the old explicit pre-check, now proven by the rollback path.
+  // admin: set the room's current show phase. Exemplary guarded-mutation usage:
+  // a PRECISE pre-check on the closed SHOW_MODES set rejects a bad mode with a
+  // clean 400 BEFORE any mutation, and commit() is the structural backstop —
+  // even if the pre-check is ever bypassed, validateStateShape inside commit()
+  // would reject the mode and roll room.mode back rather than broadcast/persist
+  // it. Belt and suspenders: routes validate for good errors, commit() guarantees
+  // no invalid state can persist or broadcast.
   if (method === 'POST' && p === '/api/mode') {
     const body = await readBody(req);
     const requested = String(body.mode || '');
-    try {
-      commit(() => { room.mode = requested; });
-    } catch (err) {
-      return send(res, 400, { error: 'unknown mode' });
-    }
+    if (!SHOW_MODES.has(requested)) return send(res, 400, { error: 'unknown mode' });
+    if (!guardedMutate(res, () => { room.mode = requested; })) return;
     broadcast();
     return send(res, 200, { mode: room.mode });
   }
@@ -509,10 +507,14 @@ async function requestHandler(req, res) {
     // presenter, prune their queue entry too, or the legacy End button strands it
     // in 'admitted'/'correcting' with no live spotlight (host can't clear it).
     const endedToken = room.spotlight?.participantToken;
-    archiveSpotlight();        // self-persisting internal writer (reports[])
-    room.spotlight = null;     // ephemeral (never persisted)
-    // The queue prune is the inline, request-driven persisted change — guard it.
-    if (endedToken && !guardedMutate(res, () => pruneShareEntry(endedToken))) return;
+    // Report push (archiveSpotlight) AND queue prune in ONE guarded commit, so they
+    // persist atomically and roll back together on failure. archiveSpotlight reads
+    // room.spotlight, so it must run BEFORE the ephemeral clear below.
+    if (!guardedMutate(res, () => {
+      archiveSpotlight();
+      if (endedToken) pruneShareEntry(endedToken);
+    })) return;
+    room.spotlight = null;     // ephemeral (never persisted) — cleared AFTER commit succeeds
     broadcast();
     return send(res, 200, { spotlight: null });
   }
@@ -570,8 +572,8 @@ async function requestHandler(req, res) {
     if (!identities.has(body.token)) return send(res, 401, { error: 'unknown token' });
     const entry = shareQueueEntry(body.token);
     if (!entry) return send(res, 404, { error: 'no share request to withdraw' });
-    clearSpotlightFor(body.token);          // clears iff this token was the live presenter (ephemeral)
     if (!guardedMutate(res, () => pruneShareEntry(body.token))) return; // terminal -> pruned (report lives in reports[])
+    clearSpotlightFor(body.token);          // ephemeral: clear AFTER the commit succeeds
     broadcast();
     return send(res, 200, { ok: true });
   }
@@ -596,6 +598,13 @@ async function requestHandler(req, res) {
       return send(res, 409, { error: 'participant is not waiting to present' });
     }
     const kind = entry.kind === 'progress' ? 'progress' : 'introduction';
+    // Persist the queue-entry transition FIRST (guarded); only on success set the
+    // ephemeral spotlight. If the commit were rejected, no ghost spotlight is left
+    // active for the next SSE consumer to pick up.
+    if (!guardedMutate(res, () => {
+      entry.status = 'admitted';
+      entry.admittedAt = Date.now();
+    })) return;
     room.spotlight = {
       id: crypto.randomBytes(5).toString('hex'),
       eventId: currentEventId(),
@@ -610,10 +619,6 @@ async function requestHandler(req, res) {
       insights: null,
       startedAt: Date.now(),
     };
-    if (!guardedMutate(res, () => {
-      entry.status = 'admitted';
-      entry.admittedAt = Date.now();
-    })) return;
     broadcast();
     return send(res, 200, { spotlight: hostSpotlight() });
   }
@@ -623,8 +628,8 @@ async function requestHandler(req, res) {
     const body = await readBody(req);
     const entry = shareQueueEntry(body.token);
     if (!entry) return send(res, 404, { error: 'no share request for this participant' });
-    clearSpotlightFor(body.token);                                      // ephemeral
     if (!guardedMutate(res, () => pruneShareEntry(body.token))) return; // persisted
+    clearSpotlightFor(body.token);                                      // ephemeral: after commit
     broadcast();
     return send(res, 200, { ok: true });
   }
@@ -639,8 +644,8 @@ async function requestHandler(req, res) {
     const liveEntry = room.shareQueue?.find(e => e.status === 'admitted' || e.status === 'correcting');
     const token = room.spotlight?.participantToken || liveEntry?.token;
     if (!token) return send(res, 409, { error: 'no active presenter' });
-    if (room.spotlight) room.spotlight = null;                 // ephemeral
     if (!guardedMutate(res, () => pruneShareEntry(token))) return; // persisted
+    if (room.spotlight) room.spotlight = null;                    // ephemeral: after commit
     broadcast();
     return send(res, 200, { ok: true });
   }
@@ -668,9 +673,14 @@ async function requestHandler(req, res) {
         console.error('share finish: research failed, archiving transcript only:', err.message);
       }
     }
-    archiveSpotlight();        // self-persisting internal writer (reports[])
-    room.spotlight = null;     // ephemeral
-    if (!guardedMutate(res, () => pruneShareEntry(body.token))) return; // persisted
+    // Report push + queue prune in ONE guarded commit (atomic, rolled back together
+    // on failure). archiveSpotlight reads room.spotlight, so it runs before the
+    // ephemeral clear below.
+    if (!guardedMutate(res, () => {
+      archiveSpotlight();
+      pruneShareEntry(body.token);
+    })) return;
+    room.spotlight = null;     // ephemeral: cleared after the commit succeeds
     broadcast();
     return send(res, 200, { ok: true });
   }
@@ -689,7 +699,6 @@ async function requestHandler(req, res) {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
-    markAttendance(id);
     if (!body.videoId || !body.title) return send(res, 400, { error: 'missing videoId/title' });
     const entry = {
       id: crypto.randomBytes(4).toString('hex'),
@@ -703,7 +712,9 @@ async function requestHandler(req, res) {
       addedAt: Date.now(),
       voterTokens: [],
     };
-    if (!guardedMutate(res, () => { queue.push(entry); sortQueue(); })) return;
+    // markAttendance inside the guard + AFTER validation: a rejected request never
+    // leaves an attendance tick behind (the property: bad request → room unchanged).
+    if (!guardedMutate(res, () => { markAttendance(id); queue.push(entry); sortQueue(); })) return;
     broadcast();
     if (!room.nowPlaying) playNext();
     return send(res, 200, { ok: true, queued: publicTrack(entry) });
@@ -729,17 +740,20 @@ async function requestHandler(req, res) {
     const body = await readBody(req);
     const id = identities.get(body.token);
     if (!id) return send(res, 401, { error: 'unknown token' });
-    markAttendance(id);
     const track = queue.find(item => item.id === body.trackId);
     if (!track) return send(res, 404, { error: 'track is no longer queued' });
     if (track.requesterToken === body.token) {
       return send(res, 409, { error: 'cannot vote for your own track' });
     }
-    if (!Array.isArray(track.voterTokens)) track.voterTokens = [];
-    const existing = track.voterTokens.indexOf(body.token);
-    const voted = existing === -1;
+    // Toggle direction from a READ-ONLY pre-check; all mutation (normalization +
+    // attendance + the toggle + re-sort) happens INSIDE the guard and AFTER the
+    // 401/404/409 gates, so a rejected vote leaves room state untouched.
+    const voted = !(Array.isArray(track.voterTokens) && track.voterTokens.includes(body.token));
     if (!guardedMutate(res, () => {
-      if (voted) track.voterTokens.push(body.token);
+      if (!Array.isArray(track.voterTokens)) track.voterTokens = [];
+      markAttendance(id);
+      const existing = track.voterTokens.indexOf(body.token);
+      if (existing === -1) track.voterTokens.push(body.token);
       else track.voterTokens.splice(existing, 1);
       sortQueue();
     })) return;

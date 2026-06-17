@@ -466,7 +466,35 @@ function restoreSnapshot(s) {
   room.mode = s.mode;
   room.visuals = s.visuals;
   room.sprint = s.sprint;
-  room.shareQueue.splice(0, room.shareQueue.length, ...s.shareQueue);
+  // A buggy mutator could have REASSIGNED room.shareQueue to a non-array — the very
+  // class of bug commit() exists to catch (validateStateShape rejects it, which
+  // triggers this rollback). The canonical array is the module-scoped `shareQueue`
+  // const, which such a reassignment leaves untouched; a bare `room.shareQueue.splice`
+  // would TypeError on the reassigned non-array and fail the rollback ITSELF. So
+  // repair the alias first, THEN refill the canonical array in place.
+  room.shareQueue = shareQueue;
+  shareQueue.splice(0, shareQueue.length, ...s.shareQueue);
+}
+
+// The rollback-scoped slice of the persisted state — exactly what restoreSnapshot
+// puts back, and ONLY that. commit() deep-clones THIS (not the full buildSnapshot)
+// so a guarded mutation does not pay to clone the unbounded `eventsArchive`/`event`
+// it never rolls back (those are owned by event-session and never touched by a
+// guarded mutator). Keeps the per-request clone cost proportional to room-owned
+// state, not to the whole archive.
+function buildRollbackSnapshot() {
+  return {
+    identities: Array.from(identities.entries()),
+    queue,
+    playHistory,
+    reports,
+    lastPlayedRequesterByVotes,
+    timer: room.timer,
+    mode: room.mode,
+    visuals: room.visuals,
+    sprint: room.sprint,
+    shareQueue: room.shareQueue,
+  };
 }
 
 // THE GUARDED-MUTATION BOUNDARY (#11 / task #837).
@@ -493,7 +521,7 @@ function restoreSnapshot(s) {
 // savePersistentState()'s degrade-not-crash net — commit() is for request-driven
 // mutations whose input the room does not fully control.
 function commit(mutator) {
-  const before = structuredClone(buildSnapshot());
+  const before = structuredClone(buildRollbackSnapshot());
   try {
     const result = mutator();
     const after = buildSnapshot();

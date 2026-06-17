@@ -1403,5 +1403,34 @@ test('guarded mutation: commit() rolls back room AND leaves disk untouched on an
   assert.equal(state.queue.length, queueLenBefore, 'queue.push container mutation rolled back');
   assert.equal(fs.readFileSync(sf, 'utf8'), diskBefore, 'disk is byte-for-byte unchanged (no bad write)');
 
+  // Adversarial (cage-match Carnot #4): a mutator that REASSIGNS room.shareQueue to
+  // a non-array must be rejected AND the rollback must not throw. A naive
+  // `room.shareQueue.splice(...)` would TypeError on the reassigned string, failing
+  // the rollback itself; restoreSnapshot repairs the canonical-array alias first.
+  const shareRefBefore = state.room.shareQueue; // the exported-const array reference
+  assert.throws(
+    () => state.commit(() => { state.room.shareQueue = 'not-an-array'; }),
+    /shareQueue is not an array/,
+    'commit rejects a non-array shareQueue (validateStateShape)',
+  );
+  assert.ok(Array.isArray(state.room.shareQueue), 'room.shareQueue is a valid array after the reassign-rollback');
+  assert.equal(state.room.shareQueue, shareRefBefore, 'rollback restored the canonical shareQueue reference (the exported binding stays stable)');
+  assert.equal(fs.readFileSync(sf, 'utf8'), diskBefore, 'disk still byte-for-byte unchanged after the reassign-rollback');
+
+  // A reassigned-scalar field (visuals) rolls back by VALUE. Note the contract
+  // asymmetry, both correct per state.js's reference-stability design: reassigned
+  // scalars (timer/mode/visuals/sprint) are restored as deep clones (value-equal,
+  // importers read room.x fresh), while CONTAINERS (queue/shareQueue/identities)
+  // are restored IN PLACE (reference-stable, importers hold the binding).
+  const visualsValueBefore = { ...state.room.visuals };
+  const queueRefBefore = state.queue;
+  assert.throws(
+    () => state.commit(() => { state.room.visuals = { theme: 'not-a-real-theme' }; }),
+    /visuals\.theme/,
+    'commit rejects an invalid visuals theme',
+  );
+  assert.deepEqual(state.room.visuals, visualsValueBefore, 'room.visuals rolled back by value (reassigned scalar)');
+  assert.equal(state.queue, queueRefBefore, 'the exported queue array reference is unchanged across rollback (container, in-place)');
+
   fs.rmSync(dir, { recursive: true, force: true });
 });
