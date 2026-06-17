@@ -788,10 +788,21 @@ function showAnnouncement({ title, message, detail, durationMs, color }) {
   return room.announcement;
 }
 
-function clearAnnouncement() {
+// In-memory announcement clear: cancels the auto-expire timeout and nulls
+// room.announcement WITHOUT broadcasting. Announcement is ephemeral (never
+// persisted), but the standalone clearAnnouncement() broadcasts — which, called
+// mid-transition by openEvent/closeEvent, would leak a PARTIAL lifecycle frame to
+// clients (queue/timer/shareQueue already cleared, new event not yet committed)
+// before the transition's single final broadcast. Those callers use this variant
+// so the only frame clients see is the committed end state.
+function clearAnnouncementInMemory() {
   if (announcementTimeout) clearTimeout(announcementTimeout);
   announcementTimeout = null;
   room.announcement = null;
+}
+
+function clearAnnouncement() {
+  clearAnnouncementInMemory();
   hooks.broadcast();
 }
 
@@ -856,4 +867,5 @@ module.exports = {
   currentAnnouncement,
   showAnnouncement,
   clearAnnouncement,
+  clearAnnouncementInMemory,
 };

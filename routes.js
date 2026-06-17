@@ -337,6 +337,7 @@ async function requestHandler(req, res) {
     try {
       return send(res, 200, { timer: startTimer({ durationMs, label: String(body.label || 'Sprint').slice(0, 40) }) });
     } catch (err) {
+      console.error('timer start failed:', err.message); // surface real bugs to logs, not only the HTTP detail
       return send(res, 500, { error: 'could not start timer', detail: err.message });
     }
   }
@@ -345,6 +346,7 @@ async function requestHandler(req, res) {
     try {
       clearTimer();
     } catch (err) {
+      console.error('timer clear failed:', err.message);
       return send(res, 500, { error: 'could not clear timer', detail: err.message });
     }
     return send(res, 200, { timer: null });

@@ -21,7 +21,7 @@ const {
   lastPlayedRequesterByVotes,
   cleanText,
   clearTimerInMemory,
-  clearAnnouncement,
+  clearAnnouncementInMemory,
   savePersistentState,
 } = require('./state');
 const { broadcast } = require('./sse-hub');
@@ -141,8 +141,8 @@ function openEvent(title) {
   // A share queue never crosses an event boundary (eventId on each entry is
   // belt-and-suspenders; this clear is the real guarantee).
   room.shareQueue.length = 0;
-  clearTimerInMemory(); // in-memory: folded into this transition's single final save (no mid-transition persist)
-  clearAnnouncement();
+  clearTimerInMemory();        // in-memory: folded into this transition's single final save (no mid-transition persist)
+  clearAnnouncementInMemory(); // in-memory: no mid-transition broadcast either — only the final broadcast publishes
   room.mode = 'welcome';
   event = {
     id: crypto.randomBytes(6).toString('hex'),
@@ -168,8 +168,8 @@ function closeEvent() {
   if (room.spotlight) { archiveSpotlight(); room.spotlight = null; }
   // Clear the share queue too — no presentation request survives the close.
   room.shareQueue.length = 0;
-  clearTimerInMemory(); // in-memory: folded into this transition's single final save (no mid-transition persist)
-  clearAnnouncement();
+  clearTimerInMemory();        // in-memory: folded into this transition's single final save (no mid-transition persist)
+  clearAnnouncementInMemory(); // in-memory: no mid-transition broadcast either — only the final broadcast publishes
   event = { ...event, status: EVENT_STATUS.CLOSED, closedAt: Date.now() };
   archiveCurrentEvent();
   savePersistentState();

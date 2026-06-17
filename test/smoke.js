@@ -1454,8 +1454,9 @@ test('atomic lifecycle: clearTimerInMemory clears room.timer WITHOUT persisting;
   delete require.cache[require.resolve('../config')];
   delete require.cache[require.resolve('../state')];
   const state = require('../state');
+  let broadcasts = 0;
   state.wireHooks({
-    broadcast() {}, playNext() {}, onTimerEnded() {},
+    broadcast() { broadcasts += 1; }, playNext() {}, onTimerEnded() {},
     currentEventId: () => null, getEvent: () => null, getEventsArchive: () => [],
   });
 
@@ -1479,6 +1480,23 @@ test('atomic lifecycle: clearTimerInMemory clears room.timer WITHOUT persisting;
   state.clearTimer();
   assert.equal(state.room.timer, null, 'clearTimer nulled room.timer');
   assert.equal(JSON.parse(fs.readFileSync(sf, 'utf8')).timer, null, 'clearTimer persisted the clear by itself');
+
+  // Broadcast ordering: the in-memory variants must NOT broadcast (so a lifecycle
+  // transition emits no partial frame); the public variants DO broadcast.
+  state.showAnnouncement({ title: 'x', message: 'y', durationMs: 60000 });
+  let b = broadcasts;
+  state.clearAnnouncementInMemory();
+  assert.equal(state.room.announcement, null, 'clearAnnouncementInMemory nulled the announcement');
+  assert.equal(broadcasts, b, 'clearAnnouncementInMemory did NOT broadcast (no mid-transition partial frame)');
+  state.showAnnouncement({ title: 'x', message: 'y', durationMs: 60000 });
+  b = broadcasts;
+  state.clearAnnouncement();
+  assert.ok(broadcasts > b, 'public clearAnnouncement DOES broadcast');
+  // clearTimerInMemory likewise must not broadcast.
+  state.startTimer({ durationMs: 60000, label: 'T3' });
+  b = broadcasts;
+  state.clearTimerInMemory();
+  assert.equal(broadcasts, b, 'clearTimerInMemory did NOT broadcast');
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
