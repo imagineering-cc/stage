@@ -1734,3 +1734,37 @@ test('m3: shapeFacilitation/assignSids/buildQuipCandidate are pure and stable', 
   assert.notEqual(research.buildInterpretation('foo', 'Foo', 0), research.buildInterpretation('foo', 'Foo', 1),
     'interpretation differs when source was read vs not');
 });
+
+// ---------------------------------------------------------------------------
+// M3-7 (cage-match Carnot finding): a host VETO that lands MID-RESEARCH must be
+// DURABLE — developFacilitation must NOT overwrite a 'dismissed' status with
+// 'asked' when it completes. Uses research:true so the pipeline takes a real
+// (network) moment, dismisses while status==='research', then asserts the final
+// state stays dismissed. The spotlightId guard alone can't catch this (same
+// spotlight, different status), so this pins the explicit status re-check.
+// ---------------------------------------------------------------------------
+test('m3: a dismiss during research is durable (not overwritten by the completing generation)', async () => {
+  await openEvent('M3 Dismiss Race');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true, research: true, title: 'Race Project' });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  // correct triggers autonomous generation; with research consent it goes through
+  // the (network) research pipeline, so there's a real 'research' window.
+  await post('/api/spotlight/correct', { token: A.token, transcript: 'race report' });
+
+  // Dismiss immediately — likely while status==='research'. Even if generation has
+  // already reached 'asked', dismiss-any->dismissed still applies; the assertion is
+  // that the FINAL state is dismissed regardless of the in-flight generation.
+  const dis = await post('/api/spotlight/facilitation/dismiss');
+  assert.equal(dis.status, 200, 'dismiss accepted');
+  assert.equal(dis.body.facilitation.status, 'dismissed', 'dismissed immediately');
+
+  // Give any in-flight generation ample time to (try to) complete and overwrite.
+  await new Promise((r) => setTimeout(r, 4000));
+  const show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.facilitation.status, 'dismissed',
+    'the completing generation did NOT resurrect the question over the host veto');
+
+  await post('/api/share/stop', { token: A.token });
+});

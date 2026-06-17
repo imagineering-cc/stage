@@ -155,7 +155,19 @@ function guardedMutate(res, mutator) {
 // can't grow unbounded across a long meetup. Mirrors the gestureTimes pattern.
 const FACILITATION_RESEARCH_COOLDOWN_MS = 20000;
 const facilitationResearchTimes = new Map(); // spotlightId -> last re-search epoch ms
+// Lazy sweep: a spotlight id is unique per turn and never reused, so once it is no
+// longer the LIVE spotlight its cooldown entry can never gate a future decision —
+// drop it. Called on every check so the map size stays O(at most one live spotlight)
+// over a long meetup, not O(spotlights this night). (cage-match: the PR comment
+// claimed a sweep that did not exist — this is the sweep, now real.)
+function sweepFacilitationResearchTimes() {
+  const liveId = room.spotlight?.id;
+  for (const id of facilitationResearchTimes.keys()) {
+    if (id !== liveId) facilitationResearchTimes.delete(id);
+  }
+}
 function facilitationResearchAllowed(spotlightId) {
+  sweepFacilitationResearchTimes();
   const last = facilitationResearchTimes.get(spotlightId) || 0;
   return Date.now() - last >= FACILITATION_RESEARCH_COOLDOWN_MS;
 }

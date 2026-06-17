@@ -360,8 +360,15 @@ async function modelInsights(profile, transcript, baseline) {
   // never as a directive. The developer message below reinforces this. (No model
   // key on the Pi today → this whole function returns null before any of this
   // reaches a model; the labelling is defence-in-depth for when a key is added.)
+  // CATALOGUE line is metadata only. For github-source entries the `summary` IS the
+  // attacker-controlled excerpt, so emitting it here would leak the same untrusted
+  // bytes OUTSIDE the fenced block below (cage-match Carnot finding) — defeating the
+  // delimiter. So for github-source we print kind/title/url WITHOUT the excerpt; the
+  // excerpt appears exactly once, inside the explicit untrusted-data fence.
   const evidence = baseline.sources
-    .map(source => `${source.kind}: ${source.title} - ${source.summary} (${source.url})`)
+    .map(source => source.kind === 'github-source'
+      ? `${source.kind}: ${source.title} (${source.url})`
+      : `${source.kind}: ${source.title} - ${source.summary} (${source.url})`)
     .join('\n');
   const untrustedExcerpts = baseline.sources
     .filter(source => source.kind === 'github-source' && source.excerpt)
@@ -604,10 +611,14 @@ function buildQuipCandidate(participantName) {
 // Concurrent-cancellation guard (mirrors developSpotlightInsights): capture
 // spotlightId before each await, re-check room.spotlight.id after — and AGAIN right
 // before the facilitation write — so a replaced/cleared/new spotlight never receives
-// a stale facilitation write. facilitation is EPHEMERAL (nested on room.spotlight,
-// never persisted): written by reference-stable reassign room.spotlight = {...},
-// broadcast (NOT committed). Never throws to the caller — a research failure
-// degrades to the quip candidate so Dreamfinder still says something.
+// a stale facilitation write. The LIVE facilitation is EPHEMERAL (nested on
+// room.spotlight, never persisted; no validateStateShape branch / isValid predicate /
+// restoreSnapshot entry): written by reference-stable reassign room.spotlight = {...},
+// broadcast (NOT committed). NOTE — distinct from the live state: the FROZEN `asked`
+// candidate DOES ride into the persisted reports[] additively at archive time (see
+// archiveSpotlight); "live facilitation is ephemeral" and "the asked candidate is
+// archived" are both true. Never throws to the caller — a research failure degrades
+// to the quip candidate so Dreamfinder still says something.
 async function developFacilitation() {
   if (!room.spotlight?.active) throw new Error('no active spotlight');
   const spotlightId = room.spotlight.id;
@@ -653,9 +664,14 @@ async function developFacilitation() {
     authoredBy = candidate.authoredBy;
   }
 
-  // FINAL re-check right before the write: a replaced/cleared spotlight must never
-  // receive this (now-stale) facilitation.
+  // FINAL re-check right before the write:
+  //  (a) a replaced/cleared spotlight must never receive this (now-stale) write; and
+  //  (b) a host VETO that landed mid-research must be DURABLE — if the host dismissed
+  //      while we were awaiting, do NOT overwrite the dismissal with 'asked'. The
+  //      spotlightId guard alone can't catch this (same spotlight, dismissed status),
+  //      so check the live facilitation status too (cage-match Carnot finding).
   if (!room.spotlight || room.spotlight.id !== spotlightId) return;
+  if (room.spotlight.facilitation?.status === 'dismissed') return; // host vetoed mid-research; honour it
   room.spotlight = {
     ...room.spotlight,
     facilitation: {
