@@ -384,17 +384,14 @@ function validateStateShape(d) {
   if (v.editedAt !== null && !Number.isFinite(v.editedAt)) fail('visuals.editedAt not null or a finite number');
 }
 
-function savePersistentState() {
-  // Fail loud, not silent: persisting before hooks are wired would write
-  // event:null over a real event (see wireHooks above).
-  if (!hooksWired) {
-    throw new Error('savePersistentState() before state.wireHooks(): event/eventsArchive would persist as null. Wire hooks in the composition root before any save.');
-  }
-  const tmp = `${STATE_FILE}.${process.pid}.tmp`;
-  // Build the object literal first so the shape gate runs on it BEFORE stringify
-  // and BEFORE the write try/catch — a validation throw must propagate like the
-  // hooksWired guard, never be swallowed by the unlink-and-continue catch below.
-  const data = {
+// Serialize the live persisted state into the exact object savePersistentState
+// writes and validateStateShape gates. Pure read of the shared containers + the
+// room holder + the event-session hooks; mutates nothing. The single source of
+// truth for "what gets persisted", shared by savePersistentState AND commit() so
+// the write path and the guarded-mutation path can never serialize a different
+// shape (the load/write-symmetry lesson, applied to the two writers).
+function buildSnapshot() {
+  return {
     identities: Array.from(identities.entries()),
     playHistory,
     queue,
@@ -408,22 +405,19 @@ function savePersistentState() {
     event: hooks.getEvent(),
     eventsArchive: hooks.getEventsArchive(),
   };
-  // Shape gate. A violation means in-memory state is corrupt; the validator's
-  // JOB is to keep garbage OFF disk — achieve that by SKIPPING this write and
-  // logging loudly, NOT by throwing. The throw is uncaught in request handlers
-  // (createIdentity -> route -> process crash); a malformed-but-parseable
-  // persisted field would otherwise crash-loop the room on the first /api/join.
-  // The last good on-disk copy is left intact. KNOWN TRADEOFF: in-memory changes
-  // since the last good save won't survive a restart until the bad state is
-  // corrected — the loud log surfaces it. A stale/empty room beats a crash-loop.
-  // (The hooksWired guard above still throws: that's a boot-wiring/deploy bug
-  // that cannot occur at request time, so crashing loudly is correct there.)
-  try {
-    validateStateShape(data);
-  } catch (err) {
-    console.error(`state save skipped: ${err.message}`);
-    return;
+}
+
+// Atomic durable write of an ALREADY-VALIDATED snapshot. No shape gate here —
+// both callers (savePersistentState, commit) validate BEFORE calling this, so a
+// double-validate would be wasted work and a single skipped validate would be a
+// silent hole. The hooksWired guard stays: persisting before the composition
+// root wires the event accessors would write event:null over a real open event
+// (a boot/deploy bug, never a request-time condition — so throwing is correct).
+function writeSnapshot(data) {
+  if (!hooksWired) {
+    throw new Error('writeSnapshot() before state.wireHooks(): event/eventsArchive would persist as null. Wire hooks in the composition root before any save.');
   }
+  const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   const json = JSON.stringify(data, null, 2);
   try {
     fs.writeFileSync(tmp, json, { mode: 0o600 });
@@ -444,6 +438,121 @@ function savePersistentState() {
     try { fs.unlinkSync(tmp); } catch (_) {}
     throw err; // propagate — a failed save must not silently look successful
   }
+}
+
+// Restore the persisted, room-OWNED mutable state from a (deep-cloned) snapshot,
+// IN PLACE so every exported reference (the `identities` Map, the `queue`/
+// `reports`/`shareQueue` arrays, the `room` holder) stays stable — importers
+// hold those bindings forever. This is commit()'s rollback leg.
+//
+// SCOPE — deliberately NOT exhaustive over all of buildSnapshot():
+//   • event / eventsArchive are owned by event-session.js and are mutated ONLY
+//     by the host-lifecycle transitions (openEvent/closeEvent), which are not
+//     guarded mutations — so a guarded mutation never changes them and there is
+//     nothing to roll back. Restoring them here would mean reaching across the
+//     module boundary the composition root exists to keep one-directional.
+//   • nowPlaying / announcement / visualEvent / spotlight are EPHEMERAL (never
+//     persisted, not in the snapshot), so they cannot cause the persisted
+//     memory/disk divergence commit() exists to prevent, and are out of scope.
+function restoreSnapshot(s) {
+  identities.clear();
+  for (const [k, v] of s.identities) identities.set(k, v);
+  queue.splice(0, queue.length, ...s.queue);
+  playHistory.splice(0, playHistory.length, ...s.playHistory);
+  reports.splice(0, reports.length, ...s.reports);
+  for (const k of Object.keys(lastPlayedRequesterByVotes)) delete lastPlayedRequesterByVotes[k];
+  Object.assign(lastPlayedRequesterByVotes, s.lastPlayedRequesterByVotes);
+  room.timer = s.timer;
+  room.mode = s.mode;
+  room.visuals = s.visuals;
+  room.sprint = s.sprint;
+  // A buggy mutator could have REASSIGNED room.shareQueue to a non-array — the very
+  // class of bug commit() exists to catch (validateStateShape rejects it, which
+  // triggers this rollback). The canonical array is the module-scoped `shareQueue`
+  // const, which such a reassignment leaves untouched; a bare `room.shareQueue.splice`
+  // would TypeError on the reassigned non-array and fail the rollback ITSELF. So
+  // repair the alias first, THEN refill the canonical array in place.
+  room.shareQueue = shareQueue;
+  shareQueue.splice(0, shareQueue.length, ...s.shareQueue);
+}
+
+// The rollback-scoped slice of the persisted state — exactly what restoreSnapshot
+// puts back, and ONLY that. commit() deep-clones THIS (not the full buildSnapshot)
+// so a guarded mutation does not pay to clone the unbounded `eventsArchive`/`event`
+// it never rolls back (those are owned by event-session and never touched by a
+// guarded mutator). Keeps the per-request clone cost proportional to room-owned
+// state, not to the whole archive.
+function buildRollbackSnapshot() {
+  return {
+    identities: Array.from(identities.entries()),
+    queue,
+    playHistory,
+    reports,
+    lastPlayedRequesterByVotes,
+    timer: room.timer,
+    mode: room.mode,
+    visuals: room.visuals,
+    sprint: room.sprint,
+    shareQueue: room.shareQueue,
+  };
+}
+
+// THE GUARDED-MUTATION BOUNDARY (#11 / task #837).
+//
+// #808 made savePersistentState() validate at the PERSISTENCE boundary and SKIP
+// on failure — the correct emergency stop for a crash-loop, but it leaves a
+// divergence: a route mutates `room`, broadcast() fans the bad state to every
+// client, the save is skipped, disk keeps last-good, and a reboot silently
+// time-travels. commit() closes that by inverting the sequence to
+// validate -> persist, with the mutation made provisionally and ROLLED BACK if
+// the proposed result is invalid:
+//
+//   snapshot persisted state  ->  run mutator (in place)  ->  validate result
+//     valid   -> persist the validated snapshot, return the mutator's result
+//     invalid -> restore the snapshot, THROW (caller maps to 4xx, broadcasts
+//                nothing) — so `room` AND disk are left exactly as they were.
+//
+// The mutator runs the SAME in-place mutation a route would have run inline; the
+// only discipline a route adopts is to wrap that mutation in commit() and to
+// broadcast ONLY after commit() returns (so a rejected mutation never reaches a
+// client). A mutator that itself throws is treated identically to an invalid
+// result: roll back and rethrow. Internal valid-by-construction writers
+// (createIdentity/recordPlay/startTimer/sprint advances) still persist through
+// savePersistentState()'s degrade-not-crash net — commit() is for request-driven
+// mutations whose input the room does not fully control.
+function commit(mutator) {
+  const before = structuredClone(buildRollbackSnapshot());
+  try {
+    const result = mutator();
+    const after = buildSnapshot();
+    validateStateShape(after); // throws on a shape the persistence gate would reject
+    writeSnapshot(after);      // already validated -> safe to write atomically
+    return result;
+  } catch (err) {
+    restoreSnapshot(before);   // room-owned persisted state back to pre-mutation
+    throw err;                 // caller catches -> 4xx; nothing persisted, nothing broadcast
+  }
+}
+
+function savePersistentState() {
+  const data = buildSnapshot();
+  // Shape gate. A violation means in-memory state is corrupt; the validator's
+  // JOB is to keep garbage OFF disk — achieve that by SKIPPING this write and
+  // logging loudly, NOT by throwing. This is the last-line net for INTERNAL
+  // valid-by-construction writers (createIdentity, recordPlay, startTimer,
+  // sprint advances) that persist outside a request's commit(); a throw here
+  // would be uncaught in those paths and could crash-loop the room. Request-
+  // driven mutations should route through commit() instead, which validates
+  // BEFORE persisting and rejects at the route. KNOWN TRADEOFF: in-memory
+  // changes since the last good save won't survive a restart until the bad
+  // state is corrected — the loud log surfaces it. A stale room beats a crash.
+  try {
+    validateStateShape(data);
+  } catch (err) {
+    console.error(`state save skipped: ${err.message}`);
+    return;
+  }
+  writeSnapshot(data);
 }
 
 function createIdentity() {
@@ -701,6 +810,10 @@ module.exports = {
   savePersistentState,
   validateStateShape,
   isValidSprintSession,
+  // guarded mutation (#11): validate-before-persist with rollback (see commit)
+  buildSnapshot,
+  restoreSnapshot,
+  commit,
   // identity + helpers
   createIdentity,
   clamp,

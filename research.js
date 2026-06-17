@@ -12,7 +12,8 @@
 // id changed — that concurrent-cancellation guard only works because every access
 // goes through `room.spotlight` (a stale captured local would defeat it). Every
 // reassignment is a field write `room.spotlight = {...}`. `archiveSpotlight`
-// unshifts into the shared `reports` array IN PLACE and calls savePersistentState.
+// unshifts into the shared `reports` array IN PLACE; it does NOT persist — its
+// callers do (the host routes fold it into a single guarded commit; see below).
 //
 // `currentEventId` lives in server.js (event-session lifecycle), so it is reached
 // through the late-bound `state.hooks.currentEventId` indirection rather than a
@@ -36,7 +37,6 @@ const {
   participantProfile,
   cleanText,
   normalizeGithubHandle,
-  savePersistentState,
 } = state;
 
 const { broadcast } = require('./sse-hub');
@@ -339,6 +339,13 @@ async function developSpotlightInsights() {
   return room.spotlight.insights;
 }
 
+// Push the live spotlight into the persisted reports[] (in place, reference-stable).
+// Does NOT persist itself: every caller persists afterward — the host routes
+// (/api/spotlight/end, /api/share/finish) fold this into a SINGLE state.commit()
+// alongside the queue prune (so the report push + prune are one atomic, guarded,
+// rolled-back-on-failure write), and event-session's openEvent/closeEvent already
+// savePersistentState() after calling this. Self-saving here would double-write and
+// break that atomicity (the report would land on disk before the guarded prune).
 function archiveSpotlight() {
   if (!room.spotlight || !room.spotlight.transcript) return;
   reports.unshift({
@@ -353,7 +360,6 @@ function archiveSpotlight() {
     endedAt: Date.now(),
   });
   reports.length = Math.min(reports.length, REPORT_LIMIT);
-  savePersistentState();
 }
 
 module.exports = {
