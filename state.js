@@ -743,10 +743,20 @@ function armTimerTimeout() {
   }, Math.min(remaining, 2147483647));
 }
 
-function clearTimer() {
+// In-memory timer clear: cancels the timeout and nulls room.timer WITHOUT
+// persisting or broadcasting. For callers that fold the timer clear into a larger
+// transaction with a single durable write at the end (openEvent/closeEvent) — so
+// they don't do a mid-transition save that could strand a partial state on a crash
+// (e.g. timer=null + queue=cleared on disk while event is still 'open'). The
+// public clearTimer() below is the standalone version that persists + broadcasts.
+function clearTimerInMemory() {
   if (timerTimeout) clearTimeout(timerTimeout);
   timerTimeout = null;
   room.timer = null;
+}
+
+function clearTimer() {
+  clearTimerInMemory();
   savePersistentState();
   hooks.broadcast();
 }
@@ -778,10 +788,21 @@ function showAnnouncement({ title, message, detail, durationMs, color }) {
   return room.announcement;
 }
 
-function clearAnnouncement() {
+// In-memory announcement clear: cancels the auto-expire timeout and nulls
+// room.announcement WITHOUT broadcasting. Announcement is ephemeral (never
+// persisted), but the standalone clearAnnouncement() broadcasts — which, called
+// mid-transition by openEvent/closeEvent, would leak a PARTIAL lifecycle frame to
+// clients (queue/timer/shareQueue already cleared, new event not yet committed)
+// before the transition's single final broadcast. Those callers use this variant
+// so the only frame clients see is the committed end state.
+function clearAnnouncementInMemory() {
   if (announcementTimeout) clearTimeout(announcementTimeout);
   announcementTimeout = null;
   room.announcement = null;
+}
+
+function clearAnnouncement() {
+  clearAnnouncementInMemory();
   hooks.broadcast();
 }
 
@@ -841,8 +862,10 @@ module.exports = {
   startTimer,
   armTimerTimeout,
   clearTimer,
+  clearTimerInMemory,
   // announcement
   currentAnnouncement,
   showAnnouncement,
   clearAnnouncement,
+  clearAnnouncementInMemory,
 };
