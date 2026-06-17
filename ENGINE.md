@@ -257,6 +257,39 @@ both **off the public proxy** like every other host control),
 return **404** on the public proxy by design (like `/api/timer/*`). See
 [CLAUDE.md](CLAUDE.md) for the full route table and the network/proxy split.
 
+### State integrity — the guarded-mutation boundary
+
+Every route that mutates **persisted, request-driven** room state does so inside
+`state.commit(mutator)`, which **validates the proposed result before it can
+persist or broadcast**:
+
+```
+snapshot persisted state → run mutator (in place) → validateStateShape(result)
+  valid   → persist the validated snapshot, return; the route then broadcasts
+  invalid → roll the snapshot back, throw → route returns 4xx, broadcasts nothing
+```
+
+So a request that would produce a state the persistence gate rejects leaves
+`room` **and** disk exactly as they were, and **no client ever sees it** — the
+broadcast happens only after `commit()` returns. This closes the memory/disk
+divergence that validating only at the persistence boundary leaves open (mutate →
+broadcast bad state → save skipped → disk keeps last-good → a reboot time-travels).
+`/api/mode` is the canonical example: it has no pre-check, so a bad mode flows
+*through* the rollback and comes back `400` with state untouched.
+
+Two deliberate carve-outs, by design rather than omission:
+- **Event lifecycle** (`/api/event/open`·`/close`) owns `event`/`eventsArchive`
+  (a different module) and is a host-only atomic transition with its own save —
+  outside the guarded-mutation scope.
+- **Ephemeral state** (`nowPlaying`, `announcement`, `visualEvent`, `spotlight`)
+  is never persisted, so it cannot cause the divergence and is not snapshot/rolled
+  back. Internal valid-by-construction writers (`createIdentity`, `recordPlay`,
+  `startTimer`, sprint advances) persist through `savePersistentState`'s
+  degrade-not-crash net, which remains the last line of defence.
+
+This is a **server-internal invariant**, not a wire change: the protocol version
+is unaffected. Frontends need do nothing — they simply never receive invalid state.
+
 ## Writing a new frontend
 
 1. Open an `EventSource` to `/api/events` (public) or `/api/show-events` (local).

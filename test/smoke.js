@@ -1325,3 +1325,83 @@ test('share: legacy spotlight routes reconcile with the queue (no orphan entries
   const stopClean = await post('/api/share/stop');
   assert.equal(stopClean.status, 409, 'stop with no live presenter is a clean 409, not a crash');
 });
+
+// ===========================================================================
+// GUARDED-MUTATION API (#11 / task #837). Validation gates the MUTATION, not just
+// serialization: a request that would produce invalid persisted state is rejected
+// at the route boundary (4xx) with room AND disk unchanged and nothing broadcast.
+// This is the regression lock for the memory/disk divergence #808 left open
+// (mutate -> broadcast bad state -> save skipped -> disk keeps last-good -> reboot
+// time-travels). /api/mode is the proof vehicle: it routes through commit() with NO
+// pre-check, so a bad mode flows THROUGH the rollback path end to end over HTTP.
+// ===========================================================================
+test('guarded mutation: an invalid /api/mode is rejected at the route, room + disk unchanged', async () => {
+  await openEvent('Guarded Mode Test');
+
+  // Establish a known-good mode and confirm it on the wire AND on disk.
+  const setGood = await post('/api/mode', { mode: 'sprint-build' });
+  assert.equal(setGood.status, 200, 'a valid mode is accepted');
+  assert.equal(setGood.body.mode, 'sprint-build');
+  assert.equal((await sseSnapshot('/api/events')).mode, 'sprint-build', 'wire reflects the good mode');
+  assert.equal(readState().mode, 'sprint-build', 'disk reflects the good mode');
+
+  // The bad request: a mode outside SHOW_MODES. It is applied to room.mode INSIDE
+  // commit(), validateStateShape throws, commit rolls back, the route returns 400.
+  const bad = await post('/api/mode', { mode: 'totally-not-a-mode' });
+  assert.equal(bad.status, 400, 'an invalid mode is rejected at the route (400)');
+
+  // THE PROPERTY: room unchanged (wire still shows the good mode) AND disk
+  // unchanged (last-good preserved) — the rollback left both exactly as they were.
+  assert.equal((await sseSnapshot('/api/events')).mode, 'sprint-build', 'room mode UNCHANGED after the rejected mutation');
+  assert.equal(readState().mode, 'sprint-build', 'disk mode UNCHANGED after the rejected mutation');
+
+  // The success path still works end to end through the same guarded boundary.
+  const setGood2 = await post('/api/mode', { mode: 'cool-down' });
+  assert.equal(setGood2.status, 200);
+  assert.equal((await sseSnapshot('/api/events')).mode, 'cool-down', 'a subsequent valid mode still applies on the wire');
+  assert.equal(readState().mode, 'cool-down', 'and persists to disk');
+});
+
+// ---------------------------------------------------------------------------
+// commit() unit: a mutation whose RESULT is invalid throws, rolls back EVERY
+// room-owned field it touched (scalar + container), and leaves the on-disk
+// last-good copy byte-for-byte unchanged (no partial/bad write). Mirrors the
+// validateStateShape/sweep unit tests: throwaway STAGE_STATE_FILE + fresh require,
+// with minimal hooks wired (the composition root's job) so commit() can persist.
+// ---------------------------------------------------------------------------
+test('guarded mutation: commit() rolls back room AND leaves disk untouched on an invalid result', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-commit-'));
+  const sf = path.join(dir, 'state.json');
+  process.env.STAGE_STATE_FILE = sf;
+  delete require.cache[require.resolve('../config')];
+  delete require.cache[require.resolve('../state')];
+  const state = require('../state');
+  state.wireHooks({
+    broadcast() {}, playNext() {}, onTimerEnded() {},
+    currentEventId: () => null, getEvent: () => null, getEventsArchive: () => [],
+  });
+
+  // A valid commit applies the change, persists it, and returns the mutator result.
+  const r = state.commit(() => { state.room.mode = 'cool-down'; return 'sentinel'; });
+  assert.equal(r, 'sentinel', 'commit returns the mutator result on success');
+  assert.equal(state.room.mode, 'cool-down', 'valid mutation applied to room');
+  assert.equal(JSON.parse(fs.readFileSync(sf, 'utf8')).mode, 'cool-down', 'valid mutation persisted to disk');
+
+  // Capture last-good before the bad mutation.
+  const diskBefore = fs.readFileSync(sf, 'utf8');
+  const modeBefore = state.room.mode;
+  const queueLenBefore = state.queue.length;
+
+  // An invalid result: corrupt a SCALAR (mode) AND a CONTAINER (push an id-less
+  // track, which validateStateShape rejects). commit must throw and roll back BOTH.
+  assert.throws(() => state.commit(() => {
+    state.queue.push({ title: 'no id here' });
+    state.room.mode = 'bogus-mode';
+  }), /STATE VALIDATION/, 'commit throws on a result the persistence gate rejects');
+
+  assert.equal(state.room.mode, modeBefore, 'room.mode scalar rolled back');
+  assert.equal(state.queue.length, queueLenBefore, 'queue.push container mutation rolled back');
+  assert.equal(fs.readFileSync(sf, 'utf8'), diskBefore, 'disk is byte-for-byte unchanged (no bad write)');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
