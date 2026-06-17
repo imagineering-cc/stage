@@ -123,7 +123,9 @@ fi
 # This does not block installation while a boot-time Wayland session is still starting.
 systemctl --user restart --no-block stage-kiosk.service
 
-printf 'Installed and started stage-server.service and stage-kiosk.service.\n'
+printf 'Installed and started stage-server.service, stage-kiosk.service, and stage-disk-alert.timer.\n'
+printf 'Verify the disk-alert timer scheduled: systemctl --user list-timers stage-disk-alert.timer\n'
+printf 'Inspect its runs:                       journalctl --user -u stage-disk-alert.service\n'
 if [[ "${linger_status}" != "yes" ]]; then
   cat <<EOF
 Automatic startup before login still requires lingering. Run:

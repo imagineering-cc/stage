@@ -49,13 +49,37 @@ chmod 600 ops/alert.local.env
 `ops/alert.local.env` is gitignored (`*.local.env` + an explicit rule). The token
 is never on a command line, never in a tracked unit file.
 
-### Failure behaviour (deliberate)
+### What it checks
 
-- **Notifier fails** (no network, unconfigured, HTTP error): logged loudly to
-  stderr / journal, but the script still exits `0`. The monitor must never
-  become the thing that crash-loops.
-- **`df` unparseable**: exits `1` so systemd records a real fault.
+Both **block** usage and **inode** usage (best-effort) for `MOUNT` — inode
+exhaustion produces the same `ENOSPC` / crash-loop symptom as block exhaustion,
+so it's the same failure class. Alerts if **either** is ≥ threshold.
+
+### Secret hygiene at runtime
+
+The Telegram bot token is passed to `curl` via a config file on **stdin**
+(`curl -K -`), NOT as a URL argument — so the token never appears in
+`ps` / `/proc/<pid>/cmdline` to other local users. (This was a review finding:
+the obvious `curl ".../bot${token}/..."` leaks the secret into argv.)
+
+### Failure behaviour (deliberate — exit-code taxonomy)
+
+- **Notifier UNCONFIGURED** (no token/chat yet — expected on first install):
+  logged to the journal, script exits **`0`**. A fresh Pi must not show a failed
+  unit before the operator drops in the secret.
+- **Notifier CONFIGURED but transport FAILED** (bad creds, network, HTTP error):
+  logged loudly AND exits **`1`** so the oneshot is marked `failed` (visible via
+  `systemctl --user --failed`) instead of decaying into silent journal noise. A
+  oneshot exiting non-zero does **not** crash-loop the timer (it reschedules
+  regardless), so this flags the fault without any crash-loop risk.
+- **`df` unparseable**: exits `1`.
 - **Bad threshold config**: exits `2`.
+
+### Alert frequency
+
+While over threshold the timer re-sends every 15 min (no debounce). That's
+intentional nagging on a real fire; if it becomes noisy, add a stamp-file
+debounce. Documented so the repeats aren't a surprise.
 
 ## 2. Mount guard (preventive)
 
