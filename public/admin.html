@@ -310,6 +310,91 @@
       font-size: 0.76rem;
       line-height: 1.4;
     }
+    /* ── M3 facilitation panel ───────────────────────────── */
+    #facilitation-panel {
+      margin-top: 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.7rem 0.8rem;
+      background: rgba(167, 139, 250, 0.05);
+    }
+    #facilitation-panel[hidden] { display: none; }
+    .fac-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem;
+    }
+    .fac-title {
+      color: var(--accent); font-size: 0.7rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .fac-research, .fac-dismissed {
+      color: var(--muted); font-size: 0.82rem; font-style: italic;
+    }
+    /* Provenance ribbon */
+    .fac-prov {
+      font-size: 0.64rem; font-weight: 700; letter-spacing: 0.04em;
+      text-transform: uppercase; padding: 0.18rem 0.45rem; border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 0.35rem;
+    }
+    .fac-prov-evidence { background: rgba(96, 165, 250, 0.14); color: #93c5fd; border: 1px solid rgba(96,165,250,0.35); }
+    .fac-prov-ai       { background: rgba(251, 191, 36, 0.14); color: #fbbf24; border: 1px solid rgba(251,191,36,0.45); }
+    .fac-prov-quip     { background: rgba(244, 114, 182, 0.12); color: #f9a8d4; border: 1px solid rgba(244,114,182,0.35); }
+    .fac-prov-detail {
+      font-weight: 600; text-transform: none; letter-spacing: 0;
+      opacity: 0.85; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .fac-question {
+      color: var(--text); font-size: 1.0rem; font-weight: 600; line-height: 1.4;
+    }
+    .fac-interp {
+      color: var(--muted); font-size: 0.82rem; line-height: 1.45; margin-top: 0.4rem;
+    }
+    .fac-connections {
+      margin: 0.4rem 0 0; padding-left: 1.1rem;
+      color: var(--text); font-size: 0.8rem; line-height: 1.45;
+    }
+    /* The quip is a wink, not a finding — light, playful, clearly not analysis. */
+    .fac-quip {
+      color: #f9a8d4; font-size: 0.92rem; font-style: italic; line-height: 1.45;
+    }
+    .fac-cites { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.55rem; }
+    .fac-cite {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      max-width: 100%; padding: 0.28rem 0.5rem;
+      border: 1px solid var(--border); border-radius: 999px;
+      background: transparent; color: var(--text);
+      font-size: 0.72rem; text-decoration: none;
+    }
+    a.fac-cite:hover { border-color: var(--accent); }
+    /* Chips the question actually rests on (sid in evidenceIds) are marked. */
+    .fac-cite-evidence {
+      border-color: var(--accent);
+      background: rgba(167, 139, 250, 0.12);
+      box-shadow: 0 0 0 1px rgba(167,139,250,0.25);
+    }
+    .fac-cite-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16rem; }
+    .fac-cite-host { color: var(--muted); font-size: 0.66rem; }
+    .fac-kind {
+      font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+      padding: 0.08rem 0.32rem; border-radius: 4px; flex-shrink: 0;
+      background: var(--border); color: var(--text);
+    }
+    .fac-kind-github, .fac-kind-githubsource, .fac-kind-github-source { background: rgba(110,118,129,0.4); color: #e8e8f0; }
+    .fac-kind-arxiv { background: rgba(178, 34, 52, 0.3); color: #fca5a5; }
+    .fac-kind-openalex { background: rgba(34, 139, 178, 0.3); color: #7dd3fc; }
+    .fac-notice {
+      margin-top: 0.55rem; color: #fbbf24; font-size: 0.76rem; font-style: italic;
+    }
+    .fac-controls { display: flex; gap: 0.5rem; margin-top: 0.7rem; }
+    .fac-controls button { font-size: 0.78rem; padding: 0.35rem 0.7rem; }
+    #facilitation-evidence {
+      margin-top: 0.6rem;
+    }
+    #facilitation-evidence[hidden] { display: none; }
+    #facilitation-evidence > summary {
+      cursor: pointer; color: var(--muted); font-size: 0.7rem;
+      text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+    }
     #spotlight-reports {
       margin-top: 0.8rem;
       border-top: 1px solid var(--border);
@@ -607,7 +692,18 @@
     <h2>Spotlight</h2>
     <div id="spotlight-status" role="status">No active spotlight.</div>
     <div id="spotlight-transcript" hidden></div>
-    <div id="spotlight-insights" hidden></div>
+
+    <!-- M3: autonomous Dreamfinder facilitation. DF asks ONE grounded question
+         (or a warm quip) by itself after the presenter finalizes their report;
+         the host only VETOES (dismiss / request another). The raw retrieved
+         evidence is tucked into a collapsed inspector below. -->
+    <div id="facilitation-panel" hidden></div>
+
+    <!-- The full raw insights output stays available as an audit affordance. -->
+    <details id="facilitation-evidence" hidden>
+      <summary>Evidence</summary>
+      <div id="spotlight-insights"></div>
+    </details>
 
     <!-- M2: phone-led presentation queue. Participants request from their own
          phones; the host admits/skips/stops/finishes here. -->
@@ -1111,6 +1207,9 @@
         renderSpotlightTranscript('');
         renderSpotlightInsights(null);
       }
+      // M3: render the autonomous facilitation question / quip (or hide the panel
+      // when there is none). `facilitation` is null until DF generates it.
+      renderFacilitation(spotlight && spotlight.facilitation);
       renderSpotlightStatus();
     }
 
@@ -1259,8 +1358,214 @@
     function renderSpotlightInsights(insights) {
       const el = document.getElementById('spotlight-insights');
       const content = insightContentHTML(insights);
-      el.hidden = !content;
       el.innerHTML = content;
+      // The insights live inside the collapsed <details> "Evidence" inspector
+      // (M3): hide the whole inspector when there's nothing retrieved to audit.
+      const inspector = document.getElementById('facilitation-evidence');
+      if (inspector) inspector.hidden = !content;
+    }
+
+    // ── M3: autonomous Dreamfinder facilitation (host veto only) ──────────
+    // Dreamfinder asks ONE grounded question (or a warm quip) BY ITSELF after the
+    // presenter finalizes their report — there is NO host "ask" button by design.
+    // The host's controls are purely a veto: Dismiss (also "continue without AI")
+    // and Request another (cursor advance is free; an exhausted set re-searches and
+    // is rate-limited server-side -> 429 here). Drives off facilitation.status.
+    let facilitationBusy = false;     // disables the veto buttons during a POST
+    let facilitationNotice = '';      // transient line (e.g. the 429 "give it a moment")
+
+    // Provenance ribbon: how the question was authored shapes how much the host
+    // should trust it. evidence-template = source-backed; openai:* = AI-authored,
+    // verify; dreamfinder-quip = a playful wink, not a finding.
+    function facilitationProvenance(authoredBy) {
+      const by = String(authoredBy || '');
+      if (by.startsWith('openai:')) {
+        const model = by.slice('openai:'.length) || 'model';
+        return { cls: 'fac-prov-ai', label: 'AI-authored — verify against sources', detail: model };
+      }
+      if (by === 'dreamfinder-quip') {
+        return { cls: 'fac-prov-quip', label: 'Dreamfinder, just playing', detail: '' };
+      }
+      // evidence-template (or anything else) -> neutral/cool source-backed.
+      return { cls: 'fac-prov-evidence', label: 'Source-backed (Dreamfinder)', detail: '' };
+    }
+
+    const CITATION_KINDS = {
+      'github': 'GitHub',
+      'github-source': 'GitHub source',
+      'arxiv': 'arXiv',
+      'openalex': 'OpenAlex',
+    };
+    function citationKindLabel(kind) {
+      const k = String(kind || '').toLowerCase();
+      return CITATION_KINDS[k] || (kind ? esc(kind) : 'source');
+    }
+    function citationKindClass(kind) {
+      const k = String(kind || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+      return k ? `fac-kind-${k}` : 'fac-kind-other';
+    }
+    // Only http(s) citation URLs become clickable links — never javascript:/data:
+    // schemes (defense-in-depth: citations are server-sourced, but esc() alone
+    // wouldn't neutralize a bare `javascript:` URL since it has no HTML metachars).
+    function safeHttpUrl(url) {
+      const u = String(url || '').trim();
+      return /^https?:\/\//i.test(u) ? u : '';
+    }
+
+    function renderFacilitation(facilitation) {
+      const el = document.getElementById('facilitation-panel');
+      if (!el) return;
+      if (!facilitation) {
+        el.hidden = true;
+        el.innerHTML = '';
+        facilitationNotice = '';
+        return;
+      }
+      el.hidden = false;
+      const status = String(facilitation.status || '');
+
+      if (status === 'research') {
+        el.innerHTML = `
+          <div class="fac-head">
+            <span class="fac-title">Dreamfinder facilitation</span>
+          </div>
+          <div class="fac-research">Dreamfinder is reading the source…</div>`;
+        return;
+      }
+
+      if (status === 'dismissed') {
+        el.innerHTML = `
+          <div class="fac-head">
+            <span class="fac-title">Dreamfinder facilitation</span>
+          </div>
+          <div class="fac-dismissed">Facilitation dismissed — continuing without it.</div>`;
+        return;
+      }
+
+      if (status !== 'asked') {
+        // Unknown / not-yet-room-visible status: keep the panel quiet.
+        el.innerHTML = `
+          <div class="fac-head">
+            <span class="fac-title">Dreamfinder facilitation</span>
+          </div>
+          <div class="fac-research">Preparing a question…</div>`;
+        return;
+      }
+
+      // status === 'asked' — render what was actually asked (the FROZEN candidate).
+      const asked = facilitation.asked || facilitation.candidate || {};
+      const prov = facilitationProvenance(facilitation.authoredBy);
+      const isQuip = asked.kind === 'quip' || facilitation.authoredBy === 'dreamfinder-quip';
+      const evidenceIds = Array.isArray(asked.evidenceIds) ? asked.evidenceIds : [];
+
+      let bodyHTML;
+      if (isQuip) {
+        // The no-public-repo joke — render as a light, clearly-playful wink, not analysis.
+        bodyHTML = `<div class="fac-quip">${esc(asked.quip || '')}</div>`;
+      } else {
+        const connections = (Array.isArray(asked.connections) ? asked.connections : [])
+          .filter(Boolean).slice(0, 2);
+        const connHTML = connections.length
+          ? `<ul class="fac-connections">${connections.map(c => `<li>${esc(c)}</li>`).join('')}</ul>`
+          : '';
+        const interpHTML = asked.interpretation
+          ? `<div class="fac-interp">${esc(asked.interpretation)}</div>`
+          : '';
+        const citations = Array.isArray(asked.citations) ? asked.citations : [];
+        const citeHTML = citations.length
+          ? `<div class="fac-cites">${citations.map(c => {
+              const rests = c && evidenceIds.includes(c.sid);
+              const host = c && c.host ? `<span class="fac-cite-host">${esc(c.host)}</span>` : '';
+              const badge = `<span class="fac-kind ${citationKindClass(c && c.kind)}">${citationKindLabel(c && c.kind)}</span>`;
+              const title = esc((c && (c.title || c.url)) || 'source');
+              const inner = `${badge}<span class="fac-cite-title">${title}</span>${host}`;
+              const href = safeHttpUrl(c && c.url);
+              const chip = href
+                ? `<a class="fac-cite${rests ? ' fac-cite-evidence' : ''}" href="${esc(href)}" target="_blank" rel="noopener">${inner}</a>`
+                : `<span class="fac-cite${rests ? ' fac-cite-evidence' : ''}">${inner}</span>`;
+              return chip;
+            }).join('')}</div>`
+          : '';
+        bodyHTML = `
+          <div class="fac-question">${esc(asked.primaryQuestion || '')}</div>
+          ${interpHTML}
+          ${connHTML}
+          ${citeHTML}`;
+      }
+
+      const detail = prov.detail ? `<span class="fac-prov-detail">${esc(prov.detail)}</span>` : '';
+      const noticeHTML = facilitationNotice
+        ? `<div class="fac-notice">${esc(facilitationNotice)}</div>`
+        : '';
+
+      el.innerHTML = `
+        <div class="fac-head">
+          <span class="fac-title">Dreamfinder asks</span>
+          <span class="fac-prov ${prov.cls}">${esc(prov.label)}${detail}</span>
+        </div>
+        <div class="fac-body${isQuip ? ' fac-body-quip' : ''}">${bodyHTML}</div>
+        ${noticeHTML}
+        <div class="fac-controls">
+          <button type="button" id="fac-another" class="ghost-btn">Request another</button>
+          <button type="button" id="fac-dismiss" class="ghost-btn">Dismiss</button>
+        </div>`;
+
+      const anotherBtn = document.getElementById('fac-another');
+      const dismissBtn = document.getElementById('fac-dismiss');
+      if (anotherBtn) {
+        anotherBtn.disabled = facilitationBusy;
+        anotherBtn.addEventListener('click', facilitationAnother);
+      }
+      if (dismissBtn) {
+        dismissBtn.disabled = facilitationBusy;
+        dismissBtn.addEventListener('click', facilitationDismiss);
+      }
+    }
+
+    async function facilitationDismiss() {
+      if (facilitationBusy) return;
+      facilitationBusy = true;
+      facilitationNotice = '';
+      renderFacilitation(spotlight && spotlight.facilitation);
+      try {
+        await postSpotlight('/api/spotlight/facilitation/dismiss', {});
+        // The next SSE frame carries status:'dismissed' and re-renders the panel.
+      } catch (err) {
+        facilitationNotice = `Could not dismiss: ${err.message}`;
+      } finally {
+        facilitationBusy = false;
+        renderFacilitation(spotlight && spotlight.facilitation);
+      }
+    }
+
+    async function facilitationAnother() {
+      if (facilitationBusy) return;
+      facilitationBusy = true;
+      facilitationNotice = '';
+      renderFacilitation(spotlight && spotlight.facilitation);
+      try {
+        const res = await fetch(`${API}/api/spotlight/facilitation/another`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (res.status === 429) {
+          // Server rate-limited the re-search: ask the host to wait a beat.
+          facilitationNotice = 'Give it a moment — Dreamfinder is still preparing one.';
+        } else if (res.status === 202) {
+          // Re-search kicked off; the fresh 'asked' candidate arrives over SSE.
+          facilitationNotice = 'Finding another…';
+        } else if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          facilitationNotice = `Could not fetch another: ${data.error || `HTTP ${res.status}`}`;
+        }
+        // 200 free cursor-advance: the SSE frame re-renders with the new question.
+      } catch (err) {
+        facilitationNotice = `Could not fetch another: ${err.message}`;
+      } finally {
+        facilitationBusy = false;
+        renderFacilitation(spotlight && spotlight.facilitation);
+      }
     }
 
     function formatReportTime(value) {
