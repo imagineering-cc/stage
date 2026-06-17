@@ -330,6 +330,8 @@ stage/
 | POST   | `/api/spotlight/correct` | Admitted presenter submits final edited transcript (per-token gated) |
 | POST   | `/api/spotlight/insights` | Host runs consented GitHub/arXiv/OpenAlex analysis |
 | POST   | `/api/spotlight/end` | Host archives and clears the spotlight        |
+| POST   | `/api/spotlight/facilitation/dismiss` | Host veto: dismiss Dreamfinder's question (host-only) |
+| POST   | `/api/spotlight/facilitation/another` | Host veto: request another question; cursor++ free, re-search rate-limited (host-only) |
 | POST   | `/api/share/request` | Guest requests to present `{token, kind}`; requires recording consent |
 | POST   | `/api/share/withdraw` | Guest leaves the presentation queue `{token}` |
 | POST   | `/api/share/admit`  | Host admits a presenter `{token}` → starts their spotlight (host-only) |

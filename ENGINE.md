@@ -157,6 +157,54 @@ projection itself is public so guests see the room's structure.
 The participant's private token (`participantToken`) is present on the **show**
 stream's spotlight for host controls but is never on the public stream.
 
+### Facilitation (M3)
+
+`spotlight.facilitation` is an **additive**, **show-stream-only** field nested in
+`spotlight`. `ENGINE_PROTOCOL_VERSION` is **unchanged (1)** — it rides only the
+private `/api/show-events` stream (the public `/api/events` payload is
+byte-identical to before M3). It is **ephemeral**: never persisted, never resumed
+across a restart (like the rest of `spotlight`).
+
+Dreamfinder reads the presenter's opted-in **public source** (README + recent
+commits + a key file) and, *autonomously* after the presenter finalizes their
+report (`/api/spotlight/correct`), asks **one** grounded question about it — no
+host pre-approval, no pause. The host's role is a **veto**:
+`POST /api/spotlight/facilitation/dismiss` and `…/another` (both host-only, off
+the public proxy). No readable public source → a warm self-deprecating **quip**
+instead of silence.
+
+```jsonc
+"facilitation": {
+  "status": "research" | "asked" | "dismissed",
+  "authoredBy": string|null,        // "evidence-template" | "openai:<model>" | "dreamfinder-quip"
+  "candidate": Candidate|null,      // the live candidate
+  "asked": Candidate|null,          // FROZEN at ask time (what was actually asked / archived)
+  "cursor": number,                 // rotation index over insights.questions
+  "proposedAt": number, "askedAt": number|null
+} | null
+// Candidate (grounded):
+{ "primaryQuestion": string,
+  "connections": [ string ],        // ≤ 2
+  "interpretation": string,         // one grounded line
+  "citations": [ { "sid": string, "title": string, "url": string, "kind": string, "host": string } ], // ≤ ~4-6
+  "evidenceIds": [ string ],        // sids whose source terms overlap the question
+  "authoredBy": string, "kind": "grounded" }
+// Candidate (no-repo quip):
+{ "quip": string, "connections": [], "interpretation": "", "citations": [], "evidenceIds": [],
+  "authoredBy": "dreamfinder-quip", "kind": "quip" }
+```
+
+**Contract note — `ready` != room-visible; `status === "asked"` is the gate.**
+`facilitation` starts `null` (no key surprises: `hostSpotlight()` always emits
+`facilitation`, null until generated). While `status: "research"` Dreamfinder is
+still reading source — a frontend should NOT render the question yet. The question
+is room-visible only once `status === "asked"` (the engine advances there
+autonomously). `dismissed` means the host vetoed it. The archived report carries
+`facilitation` = the frozen `asked` candidate (or `null`).
+
+Citations carry **stable** `sid`s assigned once at insights-build time, so the same
+question asked again after a `…/another` cursor advance cites identically.
+
 **ShareEntry** (phone-led presentation queue; added protocol v1, additive)
 ```jsonc
 // PUBLIC (on /api/events) — NEVER carries a token:
@@ -250,6 +298,8 @@ the presenter has confirmed their transcript.
 `/api/skip`, `/api/timer/start`·`/clear`, `/api/announce`·`/announce/clear`,
 `/api/sprint/start`·`/pause`·`/resume`·`/skip`·`/extend`·`/stop` and
 `GET /api/sprint`, `/api/spotlight/start`·`/insights`·`/end`,
+`/api/spotlight/facilitation/dismiss`·`/another` (the M3 facilitation veto —
+host-only, off the public proxy like every other host control),
 `/api/share/admit`·`/skip`·`/stop`·`/finish` (the phone-led queue's host
 controls — `admit` starts the presenter's spotlight, `finish` runs research+archives,
 both **off the public proxy** like every other host control),

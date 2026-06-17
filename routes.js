@@ -39,7 +39,12 @@ const { broadcast, statePayload } = require('./sse-hub');
 const sprint = require('./sprint');
 const { mpvSend, playNext } = require('./mpv');
 const { ytSearch } = require('./ytSearch');
-const { developSpotlightInsights, archiveSpotlight } = require('./research');
+const {
+  developSpotlightInsights,
+  developFacilitation,
+  shapeFacilitation,
+  archiveSpotlight,
+} = require('./research');
 const {
   currentEventId,
   isEventOpen,
@@ -139,6 +144,41 @@ function guardedMutate(res, mutator) {
       send(res, 500, { error: 'state could not be persisted', detail: err.message });
     }
     return false;
+  }
+}
+
+// Per-spotlight rate limiter for facilitation re-search (the EXPENSIVE branch of
+// /api/spotlight/facilitation/another — cursor advance over the already-retrieved
+// question set is FREE; only re-running the bounded network search is throttled).
+// Keyed by spotlight id; the entry is naturally abandoned when the spotlight clears
+// (a new spotlight has a new id), and the map is swept lazily on each check so it
+// can't grow unbounded across a long meetup. Mirrors the gestureTimes pattern.
+const FACILITATION_RESEARCH_COOLDOWN_MS = 20000;
+const facilitationResearchTimes = new Map(); // spotlightId -> last re-search epoch ms
+// Lazy sweep: a spotlight id is unique per turn and never reused, so once it is no
+// longer the LIVE spotlight its cooldown entry can never gate a future decision —
+// drop it. Called on every check so the map size stays O(at most one live spotlight)
+// over a long meetup, not O(spotlights this night). (cage-match: the PR comment
+// claimed a sweep that did not exist — this is the sweep, now real.)
+function sweepFacilitationResearchTimes() {
+  const liveId = room.spotlight?.id;
+  for (const id of facilitationResearchTimes.keys()) {
+    if (id !== liveId) facilitationResearchTimes.delete(id);
+  }
+}
+function facilitationResearchAllowed(spotlightId) {
+  sweepFacilitationResearchTimes();
+  const last = facilitationResearchTimes.get(spotlightId) || 0;
+  return Date.now() - last >= FACILITATION_RESEARCH_COOLDOWN_MS;
+}
+
+// Kick off the autonomous facilitation generation in the BACKGROUND (fire-and-
+// forget): developFacilitation self-broadcasts, is orphan-safe (spotlightId
+// re-check before every write), and never throws to us. We only start it when no
+// facilitation exists yet for this spotlight, so it runs exactly once per turn.
+function maybeStartFacilitation() {
+  if (room.spotlight?.active && !room.spotlight.facilitation) {
+    developFacilitation().catch(err => console.error('facilitation generation error:', err.message));
   }
 }
 
@@ -504,6 +544,11 @@ async function requestHandler(req, res) {
       status: 'corrected',
     };
     broadcast();
+    // AUTONOMOUS facilitation (M3): the presenter has finalized their report, so
+    // Dreamfinder asks his ONE grounded question on his own — no host pre-approval,
+    // no pause. Fires in the background (self-broadcasts when ready); the response
+    // to the presenter returns immediately so their phone isn't blocked on research.
+    maybeStartFacilitation();
     return send(res, 200, { spotlight: hostSpotlight() });
   }
 
@@ -540,6 +585,68 @@ async function requestHandler(req, res) {
     room.spotlight = null;     // ephemeral (never persisted) — cleared AFTER commit succeeds
     broadcast();
     return send(res, 200, { spotlight: null });
+  }
+
+  // ===== Facilitation veto controls (M3) — HOST-ONLY =====
+  // DELIBERATELY off the public Caddy allow-list (the /api/skip + /api/spotlight/start
+  // convention — omission IS the host-only boundary). facilitation is EPHEMERAL
+  // (nested on room.spotlight, never persisted): these reassign room.spotlight in
+  // memory + broadcast, NEVER commit (nothing to persist, so no guarded mutation).
+
+  // Host VETO: dismiss the question (any facilitation status -> dismissed). Also the
+  // 'continue without Dreamfinder' action. 409 if no live spotlight or no facilitation.
+  if (method === 'POST' && p === '/api/spotlight/facilitation/dismiss') {
+    if (!room.spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
+    if (!room.spotlight.facilitation) return send(res, 409, { error: 'no facilitation to dismiss' });
+    room.spotlight = {
+      ...room.spotlight,
+      facilitation: { ...room.spotlight.facilitation, status: 'dismissed' },
+    };
+    broadcast();
+    return send(res, 200, { facilitation: room.spotlight.facilitation });
+  }
+
+  // Host VETO: request another question. Advancing the cursor over the ALREADY-
+  // RETRIEVED question set is FREE (no network). Only when the set is exhausted
+  // (cursor wraps past the last question) do we re-run the bounded search — and
+  // that branch is RATE-LIMITED per spotlight (gestureTimes-style). Either way the
+  // result is a fresh 'asked' candidate.
+  if (method === 'POST' && p === '/api/spotlight/facilitation/another') {
+    if (!room.spotlight?.active) return send(res, 409, { error: 'no active spotlight' });
+    const fac = room.spotlight.facilitation;
+    if (!fac) return send(res, 409, { error: 'no facilitation to advance' });
+    const spotlightId = room.spotlight.id;
+    const insights = room.spotlight.insights;
+    const questions = Array.isArray(insights?.questions) ? insights.questions.filter(Boolean) : [];
+    const nextCursor = (fac.cursor || 0) + 1;
+    // Still within the retrieved set (and we have grounded questions) -> FREE cursor
+    // advance, re-shaped from the SAME insights (stable sids -> stable citations).
+    if (questions.length > 0 && nextCursor < questions.length) {
+      const candidate = shapeFacilitation(insights, nextCursor);
+      if (candidate) {
+        room.spotlight = {
+          ...room.spotlight,
+          facilitation: {
+            status: 'asked', authoredBy: candidate.authoredBy, candidate, asked: candidate,
+            cursor: nextCursor, proposedAt: fac.proposedAt, askedAt: Date.now(),
+          },
+        };
+        broadcast();
+        return send(res, 200, { facilitation: room.spotlight.facilitation });
+      }
+    }
+    // Exhausted (or never had grounded questions): re-run the bounded search,
+    // RATE-LIMITED per spotlight.
+    if (!facilitationResearchAllowed(spotlightId)) {
+      return send(res, 429, { error: 'another question is still being prepared; try again shortly' });
+    }
+    facilitationResearchTimes.set(spotlightId, Date.now());
+    // Reset facilitation so developFacilitation regenerates from scratch (it gates on
+    // facilitation==null via maybeStartFacilitation, but here we call it directly).
+    room.spotlight = { ...room.spotlight, facilitation: null };
+    developFacilitation().catch(err => console.error('facilitation re-search error:', err.message));
+    // 202: regeneration started; the fresh 'asked' candidate arrives over SSE.
+    return send(res, 202, { status: 'researching' });
   }
 
   // ===== Phone-led share queue (M2) =====
@@ -687,16 +794,12 @@ async function requestHandler(req, res) {
     if (!room.spotlight?.active || room.spotlight.participantToken !== body.token) {
       return send(res, 409, { error: 'this participant is not the active presenter' });
     }
-    // Research only runs with consentResearch; developSpotlightInsights itself
-    // re-checks, but gate here so finish stays a no-network archive when false.
-    const id = identities.get(body.token);
-    if (id?.consentResearch === true) {
-      try { await developSpotlightInsights(); } catch (err) {
-        // A research failure must NOT block the archive — the transcript is the
-        // deliverable. Log via the status the pipeline already set; archive anyway.
-        console.error('share finish: research failed, archiving transcript only:', err.message);
-      }
-    }
+    // M3 DECOUPLE: finish does NOT run research/facilitation. Generation is its own
+    // autonomous step (developFacilitation, triggered when the presenter finalizes
+    // their report via /api/spotlight/correct). Doing it here was a latent bug — the
+    // facilitation would be born and destroyed in the same action before it could be
+    // asked, AND the bounded search would run twice (propose + finish). finish now
+    // simply ARCHIVES whatever insights/facilitation state already exists and clears.
     // Report push + queue prune in ONE guarded commit (atomic, rolled back together
     // on failure). archiveSpotlight reads room.spotlight, so it runs before the
     // ephemeral clear below.
