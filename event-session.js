@@ -20,7 +20,7 @@ const {
   reports,
   lastPlayedRequesterByVotes,
   cleanText,
-  clearTimer,
+  clearTimerInMemory,
   clearAnnouncement,
   savePersistentState,
 } = require('./state');
@@ -141,7 +141,7 @@ function openEvent(title) {
   // A share queue never crosses an event boundary (eventId on each entry is
   // belt-and-suspenders; this clear is the real guarantee).
   room.shareQueue.length = 0;
-  clearTimer();
+  clearTimerInMemory(); // in-memory: folded into this transition's single final save (no mid-transition persist)
   clearAnnouncement();
   room.mode = 'welcome';
   event = {
@@ -168,7 +168,7 @@ function closeEvent() {
   if (room.spotlight) { archiveSpotlight(); room.spotlight = null; }
   // Clear the share queue too — no presentation request survives the close.
   room.shareQueue.length = 0;
-  clearTimer();
+  clearTimerInMemory(); // in-memory: folded into this transition's single final save (no mid-transition persist)
   clearAnnouncement();
   event = { ...event, status: EVENT_STATUS.CLOSED, closedAt: Date.now() };
   archiveCurrentEvent();

@@ -743,10 +743,20 @@ function armTimerTimeout() {
   }, Math.min(remaining, 2147483647));
 }
 
-function clearTimer() {
+// In-memory timer clear: cancels the timeout and nulls room.timer WITHOUT
+// persisting or broadcasting. For callers that fold the timer clear into a larger
+// transaction with a single durable write at the end (openEvent/closeEvent) — so
+// they don't do a mid-transition save that could strand a partial state on a crash
+// (e.g. timer=null + queue=cleared on disk while event is still 'open'). The
+// public clearTimer() below is the standalone version that persists + broadcasts.
+function clearTimerInMemory() {
   if (timerTimeout) clearTimeout(timerTimeout);
   timerTimeout = null;
   room.timer = null;
+}
+
+function clearTimer() {
+  clearTimerInMemory();
   savePersistentState();
   hooks.broadcast();
 }
@@ -841,6 +851,7 @@ module.exports = {
   startTimer,
   armTimerTimeout,
   clearTimer,
+  clearTimerInMemory,
   // announcement
   currentAnnouncement,
   showAnnouncement,

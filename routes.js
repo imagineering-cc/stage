@@ -331,11 +331,22 @@ async function requestHandler(req, res) {
     if (!Number.isFinite(durationMs) || durationMs < 1000 || durationMs > 24 * 60 * 60 * 1000) {
       return send(res, 400, { error: 'duration must be between 1 second and 24 hours' });
     }
-    return send(res, 200, { timer: startTimer({ durationMs, label: String(body.label || 'Sprint').slice(0, 40) }) });
+    // startTimer self-persists; an I/O write failure must surface as a controlled
+    // 500, not an uncaught throw out of the async handler (which would leave the
+    // request hanging / risk crashing the process).
+    try {
+      return send(res, 200, { timer: startTimer({ durationMs, label: String(body.label || 'Sprint').slice(0, 40) }) });
+    } catch (err) {
+      return send(res, 500, { error: 'could not start timer', detail: err.message });
+    }
   }
 
   if (method === 'POST' && p === '/api/timer/clear') {
-    clearTimer();
+    try {
+      clearTimer();
+    } catch (err) {
+      return send(res, 500, { error: 'could not clear timer', detail: err.message });
+    }
     return send(res, 200, { timer: null });
   }
 
