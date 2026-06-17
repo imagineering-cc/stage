@@ -49,6 +49,15 @@ if [[ ! -x "${DEPLOY_DIR}/launch-kiosk.sh" ]]; then
   exit 1
 fi
 
+# Disk guards (see ops/DISK-GUARDS.md). The deployed copy of these scripts must
+# exist and be executable, since the disk-alert timer execs disk-alert.sh.
+for guard in disk-alert.sh require-mount.sh; do
+  if [[ ! -x "${DEPLOY_DIR}/ops/${guard}" ]]; then
+    printf 'Missing executable %s/ops/%s; deploy the disk guards first (chmod +x).\n' "${DEPLOY_DIR}" "${guard}" >&2
+    exit 1
+  fi
+done
+
 for dependency in /usr/bin/node /usr/bin/curl /usr/bin/systemctl; do
   if [[ ! -x "${dependency}" ]]; then
     printf 'Required executable not found: %s\n' "${dependency}" >&2
@@ -70,7 +79,8 @@ fi
 
 mkdir -p "${UNIT_DIR}"
 backup_suffix="$(date +%Y%m%d-%H%M%S)"
-for unit in stage-server.service stage-kiosk.service; do
+for unit in stage-server.service stage-kiosk.service \
+            stage-disk-alert.service stage-disk-alert.timer; do
   source_unit="${SCRIPT_DIR}/${unit}"
   installed_unit="${UNIT_DIR}/${unit}"
   if [[ -f "${installed_unit}" ]] && ! cmp -s "${source_unit}" "${installed_unit}"; then
@@ -84,6 +94,17 @@ done
 systemctl --user daemon-reload
 systemctl --user reenable stage-server.service stage-kiosk.service
 systemctl --user restart stage-server.service
+
+# The disk-alert is a oneshot driven by its timer; enable/start the TIMER only
+# (the .service is pulled in by the timer, never enabled standalone). Idempotent
+# via reenable. It runs regardless of the notifier being configured yet — an
+# unconfigured notifier just logs to the journal until ops/alert.local.env exists.
+systemctl --user reenable stage-disk-alert.timer
+systemctl --user restart stage-disk-alert.timer
+if [[ ! -f "${DEPLOY_DIR}/ops/alert.local.env" ]]; then
+  printf 'NOTE: ops/alert.local.env not found — disk alerts will log to the journal\n'
+  printf '      but not notify until you create it from ops/alert.local.env.example.\n'
+fi
 
 server_ready=false
 for _ in {1..10}; do
