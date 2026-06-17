@@ -1,0 +1,15 @@
+[Unit]
+Description=Stage Pi disk-usage alert (warns Nick before the SD card fills)
+# Documentational: the guard exists because a full root fs once crash-looped CD.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nick/stage
+# Thresholds/transport are read from the gitignored ops/alert.local.env drop-in
+# (see ops/alert.local.env.example). Override here only for non-secret tuning:
+# Environment=STAGE_DISK_THRESHOLD=85
+# Environment=STAGE_DISK_MOUNT=/
+ExecStart=/home/nick/stage/ops/disk-alert.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stage-disk-alert

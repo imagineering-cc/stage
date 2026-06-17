@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the Stage Pi disk-usage alert periodically
+
+[Timer]
+# Fire ~2 min after boot, then every 15 minutes. Persistent=true catches up a
+# missed run after the Pi was off, so a disk that filled while powered down is
+# still reported on next boot.
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+# Small jitter so it never lines up exactly with other timers.
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

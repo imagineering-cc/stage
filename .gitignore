@@ -8,5 +8,10 @@ stage-state.json.*.tmp
 *.local.md
 ops/network.local.md
 
+# Disk-alert secrets drop-in (Telegram bot token + chat id). NEVER commit.
+# Only the *.example template is tracked.
+*.local.env
+ops/alert.local.env
+
 # agent isolation worktrees (never commit these)
 .claude/worktrees/
