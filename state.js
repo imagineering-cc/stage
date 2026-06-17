@@ -627,7 +627,15 @@ function publicSpotlight() {
 
 function hostSpotlight() {
   if (!room.spotlight) return null;
-  return { ...publicSpotlight(), participantToken: room.spotlight.participantToken };
+  return {
+    ...publicSpotlight(),
+    participantToken: room.spotlight.participantToken,
+    // Facilitation (M3) is always present on the wire — null until the autonomous
+    // generation step writes it — so a frontend can read `spotlight.facilitation`
+    // unconditionally (the 'ready != room-visible; status===asked is the gate'
+    // contract; see ENGINE.md). Show-stream-only, like the rest of spotlight.
+    facilitation: room.spotlight.facilitation || null,
+  };
 }
 
 // --- share queue (phone-led presentation queue, M2) ---

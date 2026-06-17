@@ -1500,3 +1500,237 @@ test('atomic lifecycle: clearTimerInMemory clears room.timer WITHOUT persisting;
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ===========================================================================
+// MILESTONE 3 — Dreamfinder facilitation (Slice 1, backend spine). Autonomous,
+// source-grounded, opt-in, host-veto. These extend the shared server child for the
+// integration paths (the no-research-consent QUIP path is deterministic + needs no
+// network) and add pure unit tests for the shaping helpers (cursor cycle, stable
+// sids, verbatim authoredBy) that a live-GitHub fetch can't reliably cover in CI.
+// ===========================================================================
+
+// Drive a presenter through request -> admit -> correct (the finalize that triggers
+// autonomous facilitation). Returns the presenter token. recording consent always;
+// research consent per-arg (false => the deterministic QUIP path, no network).
+async function presentTo(correctText, { research = false } = {}) {
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true, research });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/correct', { token: A.token, transcript: correctText });
+  return A.token;
+}
+
+// Poll the show stream until spotlight.facilitation satisfies pred (or time out).
+async function waitForFacilitation(pred, { timeoutMs = 4000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  for (;;) {
+    const snap = await sseSnapshot('/api/show-events');
+    last = snap.spotlight ? snap.spotlight.facilitation : null;
+    if (pred(last, snap)) return last;
+    if (Date.now() > deadline) throw new Error(`waitForFacilitation timed out; last = ${JSON.stringify(last)}`);
+    await new Promise((r) => setTimeout(r, 40));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M3-1. facilitation starts null on the show stream and is ABSENT on the public
+//       stream; version stays 1 (additive, show-stream-only, nested in spotlight).
+// ---------------------------------------------------------------------------
+test('m3: facilitation is show-stream-only and starts null; public stream unchanged; version 1', async () => {
+  await openEvent('M3 Wire');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+
+  // SHOW stream: spotlight present, facilitation null before any generation.
+  const show = await sseSnapshot('/api/show-events');
+  assert.equal(show.version, 1, 'protocol version stays 1');
+  assert.ok('facilitation' in show.spotlight, 'spotlight always carries a facilitation key');
+  assert.equal(show.spotlight.facilitation, null, 'facilitation starts null');
+
+  // PUBLIC stream: NO spotlight at all (so certainly no facilitation) — byte-clean.
+  const pubRaw = await rawSseFrame('/api/events');
+  assert.ok(!pubRaw.includes('"spotlight"'), 'public stream omits spotlight entirely');
+  assert.ok(!pubRaw.includes('facilitation'), 'public stream never mentions facilitation');
+  const pub = JSON.parse(pubRaw.slice('data: '.length));
+  assert.equal(pub.version, 1, 'public version stays 1');
+  for (const key of ['event', 'nowPlaying', 'queue', 'timer', 'mode', 'announcement', 'visuals', 'visualEvent', 'sprint', 'shareQueue']) {
+    assert.ok(key in pub, `pre-existing public field "${key}" still present (no-op on current room)`);
+  }
+  await post('/api/share/stop');
+});
+
+// ---------------------------------------------------------------------------
+// M3-2. AUTONOMOUS reach to 'asked' with NO host action; no-research-consent
+//       yields a QUIP candidate (kind:'quip', authoredBy:'dreamfinder-quip').
+// ---------------------------------------------------------------------------
+test('m3: facilitation reaches asked autonomously; no-repo path yields a quip', async () => {
+  await openEvent('M3 Autonomous');
+  // research:false -> the no-repo QUIP branch -> deterministic, no network.
+  const token = await presentTo('here is my final report', { research: false });
+
+  // No host call here — generation fires off /api/spotlight/correct.
+  const fac = await waitForFacilitation((f) => f && f.status === 'asked');
+  assert.equal(fac.status, 'asked', 'facilitation advanced to asked WITHOUT a host action');
+  assert.ok(fac.asked, 'the asked candidate is frozen on the facilitation');
+  assert.equal(fac.candidate.kind, 'quip', 'no research consent -> quip candidate');
+  assert.equal(fac.candidate.authoredBy, 'dreamfinder-quip', 'quip authoredBy flag');
+  assert.ok(typeof fac.candidate.quip === 'string' && fac.candidate.quip.length > 0, 'quip text present');
+  assert.ok(!('primaryQuestion' in fac.candidate), 'a quip carries no grounded question');
+  assert.equal(fac.askedAt && typeof fac.askedAt, 'number', 'askedAt stamped');
+
+  await post('/api/share/stop', { token });
+});
+
+// ---------------------------------------------------------------------------
+// M3-3. host VETO: dismiss -> dismissed (any status); 409 when nothing to dismiss.
+// ---------------------------------------------------------------------------
+test('m3: dismiss transitions to dismissed; proper 409s', async () => {
+  await openEvent('M3 Dismiss');
+
+  // 409 with no live spotlight.
+  assert.equal((await post('/api/spotlight/facilitation/dismiss')).status, 409, 'dismiss with no spotlight -> 409');
+
+  const token = await presentTo('report for dismiss', { research: false });
+  await waitForFacilitation((f) => f && f.status === 'asked');
+
+  const dis = await post('/api/spotlight/facilitation/dismiss');
+  assert.equal(dis.status, 200, 'dismiss succeeds');
+  assert.equal(dis.body.facilitation.status, 'dismissed', 'facilitation is now dismissed');
+  const show = await sseSnapshot('/api/show-events');
+  assert.equal(show.spotlight.facilitation.status, 'dismissed', 'dismissed visible on the show stream');
+
+  await post('/api/share/stop', { token });
+});
+
+// ---------------------------------------------------------------------------
+// M3-4. 'another' on a QUIP facilitation (no grounded questions, set exhausted)
+//       triggers a rate-limited RE-SEARCH (202), and a second immediate call is
+//       throttled (429). (Cursor-cycle-without-refetch over a multi-question set is
+//       covered in the pure unit test below, since it needs a grounded insights.)
+// ---------------------------------------------------------------------------
+test('m3: another on an exhausted set re-searches (202) and is rate-limited (429)', async () => {
+  await openEvent('M3 Another');
+
+  assert.equal((await post('/api/spotlight/facilitation/another')).status, 409, 'another with no spotlight -> 409');
+
+  const token = await presentTo('report for another', { research: false });
+  await waitForFacilitation((f) => f && f.status === 'asked');
+
+  // Quip has no grounded question set -> 'another' must re-search (202), throttled.
+  const first = await post('/api/spotlight/facilitation/another');
+  assert.equal(first.status, 202, 'another with an exhausted set kicks off a re-search (202)');
+  const second = await post('/api/spotlight/facilitation/another');
+  assert.equal(second.status, 429, 'an immediate second re-search is rate-limited (429)');
+
+  await post('/api/share/stop', { token });
+});
+
+// ---------------------------------------------------------------------------
+// M3-5. /api/share/finish does NOT re-run the search (the decouple). With research
+//       consent, developFacilitation runs ONCE off correct and stamps insights.
+//       searchedAt; finish must archive that SAME insights without re-searching, so
+//       the archived searchedAt is unchanged. (Network-independent: the research
+//       pipeline always stamps searchedAt even when every fetch yields nothing.)
+// ---------------------------------------------------------------------------
+test('m3: finish archives existing facilitation and does NOT re-run the search', async () => {
+  await openEvent('M3 Decouple');
+  // research:true so the pipeline runs once on correct and stamps insights.searchedAt
+  // (a non-existent handle => fetches fail/empty => quip fallback, but insights is
+  // still built+stamped; we assert the timestamp doesn't move across finish).
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true, research: true, title: 'Decouple Project' });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/correct', { token: A.token, transcript: 'final decouple report' });
+
+  // Wait for the autonomous generation to settle to 'asked'.
+  await waitForFacilitation((f) => f && f.status === 'asked', { timeoutMs: 40000 });
+  const showA = await sseSnapshot('/api/show-events');
+  const searchedAtAtCorrect = showA.spotlight.insights ? showA.spotlight.insights.searchedAt : null;
+
+  const reportsBefore = (await get('/api/reports')).body.reports.length;
+  const fin = await post('/api/share/finish', { token: A.token });
+  assert.equal(fin.status, 200, 'finish succeeds');
+  const reports = (await get('/api/reports')).body.reports;
+  assert.equal(reports.length, reportsBefore + 1, 'exactly one report archived (no born-and-destroyed)');
+  const report = reports[0];
+  // The decouple proof: finish did NOT re-search, so the archived insights.searchedAt
+  // is the SAME timestamp generation stamped at correct-time (a re-search would move it).
+  if (searchedAtAtCorrect != null) {
+    assert.equal(report.insights && report.insights.searchedAt, searchedAtAtCorrect,
+      'archived insights.searchedAt is unchanged — finish did NOT re-run the search');
+  }
+  // The asked facilitation rides into the archive (additive reports[] field).
+  assert.ok('facilitation' in report, 'archived report carries a facilitation field');
+});
+
+// ---------------------------------------------------------------------------
+// M3-6. PURE shaping helpers: shapeFacilitation cursor-cycles over the retrieved
+//       set WITHOUT re-fetching, assigns STABLE sids, derives evidenceIds, and
+//       carries authoredBy verbatim. assignSids dedupes by url + caps + stamps.
+// ---------------------------------------------------------------------------
+test('m3: shapeFacilitation/assignSids/buildQuipCandidate are pure and stable', () => {
+  delete require.cache[require.resolve('../config')];
+  delete require.cache[require.resolve('../state')];
+  delete require.cache[require.resolve('../research')];
+  const research = require('../research');
+
+  // assignSids: dedupe by url, cap, stable s0..sN.
+  const sided = research.assignSids([
+    { title: 'A', url: 'https://x/a', kind: 'github-source' },
+    { title: 'dup', url: 'https://x/a', kind: 'github' }, // same url -> dropped
+    { title: 'B', url: 'https://x/b', kind: 'arxiv' },
+  ]);
+  assert.deepEqual(sided.map((s) => s.sid), ['s0', 's1'], 'sids are stable s0..sN, deduped by url');
+  assert.equal(sided.length, 2, 'duplicate url dropped');
+
+  // A grounded insights object with multiple questions + sids (as developSpotlight
+  // Insights would have stamped them) and a model authoredBy to carry verbatim.
+  const insights = {
+    questions: ['What is the smallest test for foo?', 'Which assumption about bar to invalidate?', 'Who tackled foo nearby?'],
+    connections: ['c1', 'c2', 'c3'],
+    sources: sided,
+    authoredBy: 'openai:gpt-test',
+    terms: ['foo', 'bar'],
+    projectTitle: 'Foo Project',
+  };
+
+  const c0 = research.shapeFacilitation(insights, 0);
+  assert.equal(c0.kind, 'grounded', 'grounded candidate');
+  assert.equal(c0.primaryQuestion, insights.questions[0], 'cursor 0 -> first question');
+  assert.deepEqual(c0.connections, ['c1', 'c2'], 'connections capped at two');
+  assert.equal(c0.authoredBy, 'openai:gpt-test', 'authoredBy carried VERBATIM from insights');
+  assert.ok(c0.interpretation && typeof c0.interpretation === 'string', 'interpretation present and non-empty');
+  assert.ok(c0.citations.every((c) => typeof c.sid === 'string' && 'host' in c), 'citations carry sid + host');
+
+  // Cursor advance WITHOUT re-fetch: same insights, different cursor -> next question,
+  // and the SAME stable sids (citations identical) — proving the rotation is pure.
+  const c1 = research.shapeFacilitation(insights, 1);
+  assert.equal(c1.primaryQuestion, insights.questions[1], 'cursor 1 -> second question (no re-fetch)');
+  assert.deepEqual(c1.citations.map((c) => c.sid), c0.citations.map((c) => c.sid), 'citations sids identical across cursor (stable, built once)');
+
+  // Cursor wraps modulo the set length.
+  const c3 = research.shapeFacilitation(insights, 3);
+  assert.equal(c3.primaryQuestion, insights.questions[0], 'cursor wraps modulo question count');
+
+  // No questions -> null (caller falls back to quip).
+  assert.equal(research.shapeFacilitation({ questions: [], sources: [] }, 0), null, 'no questions -> null');
+
+  // buildQuipCandidate: kind:'quip', authoredBy flag, name interpolated, no question.
+  const quip = research.buildQuipCandidate('@octocat');
+  assert.equal(quip.kind, 'quip');
+  assert.equal(quip.authoredBy, 'dreamfinder-quip');
+  assert.ok(quip.quip.includes('octocat') || !quip.quip.includes('{name}'), 'quip interpolates the handle (no raw {name})');
+  assert.ok(!('primaryQuestion' in quip), 'quip has no grounded question');
+
+  // buildInterpretation is deterministic for the same inputs.
+  const i1 = research.buildInterpretation('foo', 'Foo Project', 2);
+  const i2 = research.buildInterpretation('foo', 'Foo Project', 2);
+  assert.equal(i1, i2, 'buildInterpretation is deterministic');
+  assert.notEqual(research.buildInterpretation('foo', 'Foo', 0), research.buildInterpretation('foo', 'Foo', 1),
+    'interpretation differs when source was read vs not');
+});
