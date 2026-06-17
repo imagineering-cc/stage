@@ -31,11 +31,25 @@ unconnected effects.
 - **Speech and audio recording are separate permissions.** Live
   transcription/display can be consented to without retaining raw audio.
   Any future audio recording must be explicit and optional.
-- **Host remains in control.** The host opens/closes events, changes phases,
-  admits presenters, and controls Dreamfinder interventions.
-- **Dreamfinder should sharpen discussion, not dominate it.** Favor one good
-  question and a small number of relevant connections over long generated
-  commentary or exhaustive result feeds.
+- **Host runs the room; Dreamfinder runs himself.** The host opens/closes
+  events, changes phases, and admits presenters. But Dreamfinder is a *familiar,
+  not a tool* (see `../.claude/CLAUDE.md`): after an opted-in share he asks his
+  question **autonomously** — no host pre-approval, no pause. The host's role
+  over facilitation is a **veto**, not a gate: dismiss the question, or ask for
+  another. (This deliberately overrides the earlier "host controls every
+  Dreamfinder intervention" stance, decided 2026-06-17.)
+- **Open-source is the path to the magic.** Facilitation is *grounded in the
+  participant's actual public source*, not generic riffing. If you want
+  Dreamfinder to facilitate your share, point him at a public repo — he reads
+  the real code (README, recent commits, key files) and asks about *that*. No
+  repo → he stays quiet for your share (falls back to transcript + arXiv/
+  OpenAlex, or silence). This is opt-in per share, **not** a requirement to
+  attend. Grounding-in-readable-source is also the trust mechanism: a question
+  anchored to code the room can pull up cannot be "model stating fiction as
+  fact" — the citation *is* where the question came from.
+- **Dreamfinder should sharpen discussion, not dominate it.** Favor one good,
+  source-grounded question over long generated commentary or exhaustive result
+  feeds.
 
 ## Milestone 0: Live Baseline
 
@@ -99,24 +113,48 @@ Complete when:
 
 ## Milestone 3: Dreamfinder Facilitation
 
-Goal: make the existing research/question capability a deliberate discussion
-moment.
+Goal: make Dreamfinder a *familiar* who reads your open source and asks one
+grounded question about it, on his own, after a share.
+
+Design locked 2026-06-17 (4-approach design workflow + adversarial judging).
+Recommended spine: a small ephemeral state machine on `room.spotlight`
+(`research → asked → dismissed`), single-question-at-generation, evidence-first
+rendering. Autonomous, not host-gated. No `ENGINE_PROTOCOL_VERSION` bump
+(`facilitation` is additive, nested in `spotlight`, show-stream-only).
 
 Work:
 
-- After a finalized report, generate a concise interpretation, one primary
-  question, up to two participant/project connections, and supporting links.
-- Search consented public GitHub material and public research sources within
-  predictable time limits.
-- Add host controls to ask the proposed question aloud, request another
-  question, dismiss output, or continue discussion without AI output.
-- Keep citations visible on the host/room displays and distinguish
-  evidence-template output from model-authored output.
+- **Read the actual source, not just metadata.** Extend `research.js`
+  `githubResearch()` from the repo-list/description fetch it does today to
+  reading code: README + recent commits/diffs + a key file or two (GitHub API,
+  anon at low rate or `STAGE_GITHUB_TOKEN`). This grounding is the heart of the
+  feature.
+- Opt-in per share: facilitation requires the participant to have pointed at a
+  public repo (extend the profile/consent). No repo → Dreamfinder stays quiet
+  for that share.
+- After a finalized report, generate a concise interpretation, **one** primary
+  question grounded in named source, up to two connections, and supporting
+  links — then **ask it autonomously** (no pause, no host pre-approval).
+- Host controls are a **veto**: dismiss the question, or request another
+  (re-search rate-limited per spotlight once the retrieved set is exhausted).
+- **Decouple generation from `/api/share/finish`** (today it generates+archives
+  +clears in one action — `routes.js:694/707` — so a question is born and
+  destroyed before it can be asked, and the search runs twice). Generation moves
+  to its own step; finish archives whatever facilitation state exists.
+- Keep citations visible on host AND room, anchored to the source they came
+  from; distinguish evidence-template from model-authored output (the latter
+  only when `STAGE_OPENAI_API_KEY` is set; carries `authoredBy`).
+- **Security (named up front):** reading attacker-controllable repo content and
+  later feeding it to a model is a prompt-injection surface. On the Pi today
+  (no model key) it's deterministic template matching — low risk. The
+  cage-match on Slice 1 must treat repo-content-→-model as a trust boundary
+  before any model key is installed.
 
 Complete when:
 
-- Dreamfinder can ask one relevant, host-approved question after a share and
-  the room can inspect what evidence informed it.
+- Dreamfinder reads an opted-in participant's public source and asks one
+  relevant question about it, on his own, after a share — and the room can
+  pull up the exact source that informed it. The host can veto or re-roll.
 
 ## Milestone 4: Event Recap
 
