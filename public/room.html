@@ -904,7 +904,7 @@
   .facil-question {
     position: relative;
     padding: 18px 22px;
-    border-left: 4px solid var(--facil-accent, var(--spotlight-color));
+    border-left: 4px solid var(--spotlight-color);
     border-radius: 0 12px 12px 0;
     background: linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.01));
     color: rgba(248,250,253,0.98);
@@ -954,12 +954,12 @@
     border-radius: 50%;
     background: rgba(240,240,245,0.28);
   }
-  .facil-cite.evidence .facil-cite-dot { background: var(--facil-accent, var(--spotlight-color)); }
+  .facil-cite.evidence .facil-cite-dot { background: var(--spotlight-color); }
   .facil-cite-title {
     color: rgba(246,248,252,0.92);
     font-weight: 600;
   }
-  .facil-cite.evidence .facil-cite-title { color: var(--facil-accent, var(--spotlight-color)); }
+  .facil-cite.evidence .facil-cite-title { color: var(--spotlight-color); }
   .facil-cite-host {
     color: rgba(240,240,245,0.5);
     font-size: 12px;
@@ -2237,9 +2237,19 @@
   // before the host lets it through.
   function renderFacilitationCard(facil) {
     const asked = (facil && facil.status === 'asked') ? facil.asked : null;
-    const fingerprint = asked ? `${facil.askedAt || ''}` : '';
-    // accent colour tracks the spotlight hue so the question band and its
-    // cited evidence dots visibly point at each other.
+    // Render-dedupe fingerprint is CONTENT-derived, not askedAt-derived: the
+    // backend freezes `asked` at ask time and always mints a fresh askedAt, so
+    // today an askedAt change and a content change are 1:1 — but keying on
+    // content removes the coupling entirely (a hypothetical same-askedAt content
+    // edit, or a missing/empty askedAt, can never strand a stale card or a
+    // never-rendered one). Sentinel '∅' marks "no card" so a real askedAt of 0
+    // or an empty payload can't collide with it. (cage-match Carnot finding.)
+    const fingerprint = asked
+      ? JSON.stringify([facil.authoredBy, facil.askedAt, asked.kind, asked.primaryQuestion,
+          asked.quip, asked.interpretation, asked.connections, asked.citations, asked.evidenceIds])
+      : '∅';
+    // The question band and its cited evidence dots share the spotlight hue
+    // (var(--spotlight-color)) so they visibly point at each other.
     spotlightOverlay.classList.toggle('has-facilitation', Boolean(asked));
     if (fingerprint === facilitationFingerprint) return;
     facilitationFingerprint = fingerprint;
@@ -2249,7 +2259,10 @@
     const isQuip = asked.kind === 'quip' || facil.authoredBy === 'dreamfinder-quip';
     const authoredBy = String(facil.authoredBy || '');
     const isModel = authoredBy.startsWith('openai:');
-    const evidenceIds = Array.isArray(asked.evidenceIds) ? asked.evidenceIds.map(String) : [];
+    // Filter empties: a blank sid must never earn the evidence accent (this is
+    // trust-boundary UI; a malformed id can't masquerade as cited evidence).
+    const evidenceIds = (Array.isArray(asked.evidenceIds) ? asked.evidenceIds : [])
+      .map(String).filter(Boolean);
     const citations = Array.isArray(asked.citations) ? asked.citations.slice(0, 6) : [];
 
     const label = document.createElement('div');
@@ -2348,7 +2361,11 @@
     const question = String(
       asked.kind === 'quip' ? (asked.quip || '') : (asked.primaryQuestion || '')
     ).trim();
-    const fingerprint = `${facil.askedAt || ''}`;
+    // Re-key on askedAt so a host "another" re-roll (new askedAt) re-speaks while
+    // an identical re-delivery stays silent. The `a:` prefix + question fallback
+    // means a (contractually-shouldn't-happen) missing askedAt can't collide with
+    // the empty-string initial fingerprint and silently mute an asked question.
+    const fingerprint = `a:${facil.askedAt || ''}|${question}`;
     if (!question || fingerprint === spokenQuestionFingerprint || timerState || announcementState) return;
     if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') return;
     spokenQuestionFingerprint = fingerprint;
