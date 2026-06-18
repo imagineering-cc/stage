@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { JOIN_URL, PUBLIC_DIR, SHOW_MODES } = require('./config');
+const { JOIN_URL, PUBLIC_DIR, SHOW_MODES, GESTURE_COOLDOWN_MS } = require('./config');
 const {
   room,
   identities,
@@ -55,6 +55,7 @@ const {
   getEvent,
   getEventsArchive,
 } = require('./event-session');
+const { buildRecap, renderRecapHtml } = require('./recap');
 
 // --- HTTP helpers ---
 function readBody(req) {
@@ -85,6 +86,21 @@ function requireOpenEvent(res) {
   if (isEventOpen()) return true;
   send(res, 403, { error: 'No event is running right now.', eventClosed: true });
   return false;
+}
+
+// Resolve the event record a recap should describe (M4). With an explicit `id`,
+// match an archived event first, then the live event if its id matches. With no
+// id, fall back to the current OPEN event (the host's "recap what just happened"
+// path). Returns the raw event record ({id,title,status,openedAt,closedAt}) or
+// null. The live event is read through getEvent() so a still-open event carries
+// its real openedAt/null closedAt; recap.buildRecap normalizes either shape.
+function resolveRecapEvent(id) {
+  const live = getEvent();
+  if (id) {
+    return getEventsArchive().find(e => e.id === id) ||
+      (live && live.id === id ? live : null);
+  }
+  return live || null;
 }
 
 // THE TRUST BOUNDARY (M2). The single source of truth for "who may speak" is
@@ -272,6 +288,27 @@ async function requestHandler(req, res) {
     });
   }
 
+  // host: event recap (M4). A reviewable recap assembled from ALREADY-archived
+  // data (reports/history/attendees/event record) so closing an event leaves
+  // shareable material without manual note-taking. HOST-ONLY — kept off the
+  // public Caddy allow-list like /api/reports, /api/event/* (it surfaces
+  // consented participant material). `?id=` selects an archived OR the live
+  // event; no id falls back to the current open event. The consent-integrity
+  // gate (withdrawn recording consent / removed reports never leak) lives in
+  // recap.buildRecap; this route only resolves the event record and renders.
+  if (method === 'GET' && (p === '/api/event/recap' || p === '/api/event/recap.html')) {
+    const id = url.searchParams.get('id');
+    const eventRecord = resolveRecapEvent(id);
+    if (!eventRecord) return send(res, 404, { error: 'unknown event' });
+    const recap = buildRecap(eventRecord);
+    if (p === '/api/event/recap.html') {
+      const html = renderRecapHtml(recap);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    }
+    return send(res, 200, { recap });
+  }
+
   // admin: mint a new attendee
   if (method === 'POST' && p === '/api/mint') {
     return send(res, 200, createIdentity());
@@ -323,7 +360,13 @@ async function requestHandler(req, res) {
     return send(res, 200, { visuals: room.visuals });
   }
 
-  // guest: phone motion triggers a short visual response, rate-limited per person
+  // guest: phone motion triggers a short, PERSONAL visual response (M5). The burst
+  // is identity-keyed — it carries THIS participant's assigned Dreamfinder color so
+  // the room shows whose pulse it is — and BOUNDED: a per-token cooldown
+  // (GESTURE_COOLDOWN_MS) keeps a guest from continuously overwriting the shared
+  // background. The pulse is a transient additive mutation to `visualEvent`; it
+  // NEVER touches the persistent base `room.visuals`, so one phone can colour the
+  // room for a moment but cannot take it over. That bound IS the M5 invariant.
   if (method === 'POST' && p === '/api/gesture') {
     if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
@@ -331,14 +374,24 @@ async function requestHandler(req, res) {
     if (!id) return send(res, 401, { error: 'unknown token' });
     if (body.type !== 'shake') return send(res, 400, { error: 'unknown gesture' });
     const lastAt = gestureTimes.get(body.token) || 0;
-    if (Date.now() - lastAt < 900) return send(res, 429, { error: 'shake too frequent' });
+    if (Date.now() - lastAt < GESTURE_COOLDOWN_MS) {
+      // Bounded, not continuous: a too-soon second pulse is rejected so the shared
+      // room canvas can't be spammed/held by one participant. Surface the wait so a
+      // frontend can show a calm "your pulse is still glowing" rather than an error.
+      const retryAfterMs = GESTURE_COOLDOWN_MS - (Date.now() - lastAt);
+      return send(res, 429, { error: 'pulse too frequent', retryAfterMs });
+    }
     markAttendance(id); // only after the gesture is accepted — a rejected shake leaves no attendance tick
     gestureTimes.set(body.token, Date.now());
+    const intensity = clamp(body.intensity, 0, 1, 0.5);
     room.visualEvent = {
       id: crypto.randomBytes(4).toString('hex'),
       type: 'shake',
-      intensity: clamp(body.intensity, 0, 1, 0.5),
-      color: id.color,
+      intensity,
+      // Server-derived, guaranteed-bounded 0..1 scalar a frontend can trust without
+      // re-validating `intensity`. Additive wire field; older frontends ignore it.
+      magnitude: intensity,
+      color: id.color,            // the requester's assigned Dreamfinder colour — the pulse is THEIRS
       requesterName: identityDisplayName(id),
       at: Date.now(),
     };
@@ -557,6 +610,22 @@ async function requestHandler(req, res) {
     const id = identities.get(room.spotlight.participantToken);
     if (id?.consentResearch !== true) {
       return send(res, 409, { error: 'participant has not consented to external research and analysis' });
+    }
+    // M3 DOUBLE-SEARCH GUARD. Autonomous facilitation (fired by /api/spotlight/correct
+    // via maybeStartFacilitation) ALSO calls developSpotlightInsights — so the moment
+    // facilitation begins it stamps room.spotlight.facilitation (status 'research' →
+    // 'asked'/'dismissed'). That single ephemeral field is the authoritative "the
+    // expensive GitHub/arXiv/OpenAlex search has already run (or is in-flight) for THIS
+    // spotlight" witness. If it's present, this legacy host route must NOT kick off a
+    // SECOND full search — return whatever insights the autonomous path already built
+    // (null while still 'research', populated once 'asked'). No new flag: we reuse the
+    // facilitation state machine that maybeStartFacilitation already gates on.
+    if (room.spotlight.facilitation) {
+      return send(res, 200, {
+        insights: room.spotlight.insights || null,
+        spotlight: hostSpotlight(),
+        deduped: true,
+      });
     }
     try {
       const insights = await developSpotlightInsights();

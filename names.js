@@ -41,7 +41,7 @@ const NO_REPO_QUIPS = [
   "Alas, {name} keeps their workshop locked, so I'm dreaming blind — but my instincts say there's a `// TODO` in there, older than it admits, quietly holding the roof up. Open the doors sometime and I'll bring proof instead of poetry.",
   "{name}'s repo stays sealed to me, so this is a horoscope, not a reading: I foresee a config nobody fully understands, and a test marked skip 'just for now' — a now that was months ago. Unlock the grimoire and I'll trade omens for facts.",
   "The source is shut to me, so I'm running on pure vibes, and the vibes are clear: it works, and {name} is not entirely sure why. Show me the code and I'll turn that mystery into a question worth asking.",
-  "I can't see a single line, so I'm dreaming blind — but a familiar learns one thing early: the bug always hides in the part you're proudest of. Am I right? Neither of us can tell. That is the tragedy of a locked door.",
+  "I can't see a single line of {name}'s, so I'm dreaming blind — but a familiar learns one thing early: the bug always hides in the part you're proudest of. Am I right? Neither of us can tell. That is the tragedy of a locked door.",
   "No visibility into {name}'s work, which has never once stopped me from having opinions. Open it up and I'll upgrade the opinion to an insight — I do my best work with the lights on.",
   "Blind as I am to {name}'s repo, I'll still wager there's one function in there doing the work of six, with a name that admits to none of it. Prove me wrong — truly, I would love to be proven wrong.",
   "Every locked repo is a spark I can see glowing but can't quite catch, and {name}'s is glowing rather brightly. A pity. Crack it open sometime and it goes in the jar with the rest.",
