@@ -285,6 +285,22 @@ regardless.
 >   `--signal=SIGKILL` to `systemctl kill` (its default is SIGTERM) so the
 >   last-resort teardown is genuinely hard. And `stage-reader-*` is a **reserved**
 >   systemd unit namespace — never create non-reader system units with that prefix.
+>
+> **VERIFIED WORKING ON-PI (2026-06-19) — all 7 checklist items GREEN.** The on-Pi
+> gate caught three latent make-it-work defects (none from the round-3/4 fix), now
+> fixed + observed working (claude returned a real non-null finding inside the cage
+> against `antirez/smallchat`, clean teardown, scratch wiped):
+> - **seccomp `@resources`.** The filter denied `sched_setscheduler` (syscall 119),
+>   which bun (claude's runtime) calls at startup → SIGSYS (`status=31/SYS`) on
+>   exec. Removed `@resources` from the denylist (it only governs a process's own
+>   scheduling/priority — no escape vector). Without this the cage confines but the
+>   workload never runs.
+> - **token injection.** `claude setup-token` leaves no config-dir login; the
+>   wrapper now reads `CLAUDE_CODE_OAUTH_TOKEN` from stage-reader's `.reader-oauth.env`
+>   (parsed, never sourced) and `--setenv`s it into the cage. Without this claude
+>   runs "Not logged in" → null finding.
+> - **read timeout.** Default raised 60s → 180s (`reader.js`): a real agentic read
+>   on the Pi exceeds 60s; the Reader only needs to be ready by barge-in.
 
 ---
 
@@ -356,12 +372,31 @@ sudo visudo -c                                    # re-validate the whole tree
 rm -f "$TMP"
 
 # 5. mint stage-reader's OWN claude OAuth token (Max-plan path, SEPARATE from nick's)
-#    Run claude setup-token AS stage-reader, writing to its own config dir:
+#    IMPORTANT (verified on-Pi 2026-06-19): `claude setup-token` does NOT leave a
+#    config-dir login that `claude -p` honors on its own (it would report
+#    "Not logged in · Please run /login"). It produces a CLAUDE_CODE_OAUTH_TOKEN
+#    string that must be written to .reader-oauth.env; the root wrapper injects it
+#    into the cage env (see ops/stage-reader-run, "stage-reader's OWN ... token").
+#    Run setup-token AS stage-reader:
 sudo -u stage-reader env HOME=/var/lib/stage-reader/home \
   CLAUDE_CONFIG_DIR=/var/lib/stage-reader/claude-config \
-  ~/.local/bin/claude setup-token
-#    (Follow the prompt; the token is stored under the stage-reader config dir.
-#     Confirm it is 0600 and owned by stage-reader.)
+  /usr/local/bin/claude setup-token
+#    It prints a URL → approve in a browser → the browser shows a `<code>#<state>`
+#    code → PASTE THAT CODE BACK INTO THE setup-token PROMPT (not anywhere else).
+#    setup-token then prints the real token: `sk-ant-oat01-...`. Write it to the
+#    token file the wrapper reads (0600, owned stage-reader):
+read -rs TOK && printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$TOK" \
+  | sudo tee /var/lib/stage-reader/claude-config/.reader-oauth.env >/dev/null
+sudo chown stage-reader:stage-reader /var/lib/stage-reader/claude-config/.reader-oauth.env
+sudo chmod 600 /var/lib/stage-reader/claude-config/.reader-oauth.env
+#    (paste the sk-ant-oat01-... token at the silent prompt; it is not echoed)
+#    Sanity-check auth BEFORE relying on the cage:
+#      printf 'Reply {"result":"ok"}' | sudo -u stage-reader env \
+#        HOME=/var/lib/stage-reader/home CLAUDE_CONFIG_DIR=/var/lib/stage-reader/claude-config \
+#        CLAUDE_CODE_OAUTH_TOKEN="$(sudo sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p' \
+#          /var/lib/stage-reader/claude-config/.reader-oauth.env)" \
+#        /usr/local/bin/claude -p --input-format text --output-format json --permission-mode dontAsk
+#      EXPECT: is_error:false with a real result. 401 = bad token; "Not logged in" = empty token.
 
 # 6. load the egress filter
 sudo nft -f ~/stage/ops/stage-reader-nftables.conf

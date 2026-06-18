@@ -127,7 +127,13 @@ function cloneMaxBytes() { return numEnv('STAGE_READER_CLONE_MAX_BYTES', 50 * 10
 // git clone wall-clock timeout.
 function cloneTimeoutMs() { return numEnv('STAGE_READER_CLONE_TIMEOUT_MS', 30000); }
 // Claude model run wall-clock timeout (SIGTERM, then SIGKILL after the grace).
-function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 60000); }
+// Default 180s: an AGENTIC read of a real repo on the Pi (Max-plan inference +
+// multiple Read/Grep/Glob tool round-trips) routinely exceeds 60s — verified
+// on-Pi 2026-06-19, where a 60s cap SIGTERM'd a real antirez/smallchat read to a
+// null finding while 240s produced a genuine multi-line finding. The Reader fires
+// on /share/admit and only needs to be ready by barge-in, so a longer ceiling is
+// free. Override per-deployment with STAGE_READER_TIMEOUT_MS.
+function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 180000); }
 // Grace between SIGTERM and SIGKILL (mirrors sprint.js's chime guard idea).
 function killGraceMs() { return numEnv('STAGE_READER_KILL_GRACE_MS', 3000); }
 

@@ -227,6 +227,26 @@ UNIT="stage-reader-${RUN_TOKEN}"
 # If a path is absent on a given host, the on-Pi run fails LOUDLY (claude won't
 # start) rather than silently widening the cage.
 #
+# ── stage-reader's OWN Max-plan OAuth token (sandbox auth) ────────────────────
+# claude inside the cage authenticates via CLAUDE_CODE_OAUTH_TOKEN — the Max-plan
+# OAuth token minted by `claude setup-token` as stage-reader. `setup-token` does
+# NOT leave a config-dir login state that `claude -p` honors on its own (it
+# reports "Not logged in · Please run /login"), and reader.js deliberately passes
+# NO token through sudo (sudo strips env), so the token MUST be injected into the
+# cage env HERE. We (root) read it from stage-reader's OWN 0600 file; it never
+# transits nick's process or the sudo env. This is the Max-plan token (zero
+# marginal cost), NOT the metered ANTHROPIC_API_KEY (which reader.js hard-refuses).
+# We PARSE the file (sed), never `source` it — a malicious value can at worst be a
+# bogus token (claude fails auth → null finding), never code execution. If the
+# token is absent/empty, claude runs unauthenticated and the reader gets a null
+# finding — on-Pi checklist item 5 catches that.
+READER_OAUTH_ENV="${READER_CONFIG}/.reader-oauth.env"
+READER_OAUTH_TOKEN=''
+if [ -r "$READER_OAUTH_ENV" ]; then
+  READER_OAUTH_TOKEN="$(sed -n 's/^[[:space:]]*CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*//p' "$READER_OAUTH_ENV" | tail -n1)"
+  READER_OAUTH_TOKEN="${READER_OAUTH_TOKEN%\"}"; READER_OAUTH_TOKEN="${READER_OAUTH_TOKEN#\"}"
+fi
+
 # Built as an ARRAY so the dynamic CLAUDE_BINDS (the resolved claude install
 # tree + node) can be appended without a fragile backslash-continued literal.
 ARGS=(
@@ -275,6 +295,8 @@ if [ "${#CLAUDE_BINDS[@]}" -gt 0 ]; then
     [ -n "$b" ] && ARGS+=(--property=BindReadOnlyPaths=-"$b")
   done
 fi
+# Inject the Max-plan OAuth token into the cage env (sandbox auth, see above).
+[ -n "$READER_OAUTH_TOKEN" ] && ARGS+=(--setenv=CLAUDE_CODE_OAUTH_TOKEN="$READER_OAUTH_TOKEN")
 ARGS+=(
   --property=BindPaths="$READER_HOME"
   --property=BindPaths="$READER_CONFIG"
@@ -295,7 +317,15 @@ ARGS+=(
   --property=RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX"
   --property=SystemCallArchitectures=native
   --property=SystemCallFilter=@system-service
-  --property=SystemCallFilter="~@privileged @mount @debug @reboot @swap @obsolete @resources"
+  # NOTE: @resources is intentionally NOT in this denylist. claude is a
+  # bun-compiled binary that calls sched_setscheduler (syscall 119 on arm64) at
+  # startup for its thread pool; denying @resources kills it with SIGSYS
+  # (status=31/SYS) the instant it execs — the "broken cage that never runs"
+  # failure (verified on-Pi 2026-06-18). @resources only lets a process tune its
+  # OWN scheduling/affinity/priority/memory-policy — no escape, privilege, write,
+  # or exfil vector — so allowing it (as @system-service already intends) is a
+  # safe loosening for a read-only, no-caps, egress-filtered workload.
+  --property=SystemCallFilter="~@privileged @mount @debug @reboot @swap @obsolete"
   --property=CapabilityBoundingSet=
   --property=AmbientCapabilities=
   --property=UMask=0077
