@@ -109,8 +109,12 @@ function sandboxWrapper() {
 // The sudo binary (configurable for tests; the wrapper requires root via NOPASSWD
 // sudoers). Default 'sudo'.
 function sudoBin() { return process.env.STAGE_READER_SUDO_BIN || 'sudo'; }
-// The systemctl binary, for the best-effort kill-path reaper (cage-match FIX C).
-function systemctlBin() { return process.env.STAGE_READER_SYSTEMCTL_BIN || 'systemctl'; }
+// The root-owned reaper helper, for the best-effort kill-path teardown (cage-match
+// FIX C + round-3 HIGH). reader.js NEVER calls `systemctl` directly: it calls this
+// single-purpose helper, which validates the unit name and runs `systemctl
+// stop|kill` itself. The sudoers grant points at THIS path (no wildcard systemctl
+// args), so a permissive sudo glob cannot widen what the reaper can touch.
+function reaperBin() { return process.env.STAGE_READER_REAPER_BIN || '/usr/local/sbin/stage-reader-reap'; }
 // Where the OAuth token lives (gitignored, chmod 600). Read in node, never echoed.
 function tokenFile() {
   return process.env.STAGE_READER_TOKEN_FILE || path.join(__dirname, 'ops', 'reader.local.env');
@@ -559,17 +563,22 @@ function runClaude(cloneDir, childEnv) {
     //   root sudo is owned by the system manager, so `sudo -n systemctl stop` is
     //   the privileged form (also best-effort; a missing sudoers entry just makes
     //   it a no-op, falling back to the signal chain above).
+    //
+    //   ROUND-3 HIGH: we do NOT run `sudo -n systemctl stop|kill stage-reader-*`
+    //   directly any more (that needed a WILDCARD sudoers grant on a general tool).
+    //   Instead we invoke the root-owned `stage-reader-reap` helper with the ONE
+    //   unit name; it validates the name and runs stop+kill itself. The sudoers
+    //   grant is scoped to the fixed helper path, so the reaper cannot be coerced
+    //   into touching any other unit regardless of how sudo matches the argument.
     const reapUnit = () => {
       if (!unit) return;
-      for (const verb of ['stop', 'kill']) {
-        try {
-          const r = spawn(sudoBin(), ['-n', systemctlBin(), verb, unit], {
-            stdio: 'ignore',
-            env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin' },
-          });
-          r.on('error', () => { /* systemctl/sudo absent; best-effort */ });
-        } catch { /* best-effort */ }
-      }
+      try {
+        const r = spawn(sudoBin(), ['-n', reaperBin(), unit], {
+          stdio: 'ignore',
+          env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin' },
+        });
+        r.on('error', () => { /* sudo/helper absent; best-effort */ });
+      } catch { /* best-effort */ }
     };
     killTimer = setTimeout(() => {
       console.error('[READER] claude run timed out; SIGTERM');

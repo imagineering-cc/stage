@@ -676,3 +676,88 @@ test('wrapper: rejects a clone dir OUTSIDE /var/lib/stage-reader/clones (FIX D +
     /escapes clones root|clones dir missing|not a directory|does not resolve|run install-reader-sandbox/i,
   );
 });
+
+// ── Slice 8 round-3 HIGH: the REAPER helper's own argument validation ─────────
+// The kill-path reaper is now a single-purpose root-owned helper that REPLACES a
+// wildcard `systemctl stop|kill stage-reader-*` sudoers grant. It is the real
+// gate, so its name validation must reject every coercion vector before it ever
+// reaches systemctl. These run the helper directly (no root needed — every reject
+// path fires BEFORE the systemctl call). NOTE the macOS/Linux split: on a host
+// WITHOUT systemctl (macOS dev), a VALID name dies at "systemctl not found" (still
+// exit 64); on Linux/CI it exits 0 (stop/kill of an absent unit is a no-op). So the
+// accept test asserts the name PASSED the gate (no name-rejection message), not a
+// specific exit code — same env-aware style as the wrapper realpath test above.
+
+const REAPER_PATH = path.join(__dirname, '..', 'ops', 'stage-reader-reap');
+
+function runReaper(args) {
+  const cp = require('node:child_process');
+  const r = cp.spawnSync('/bin/bash', [REAPER_PATH, ...args], { encoding: 'utf8' });
+  return { code: r.status, stderr: r.stderr || '' };
+}
+
+// The rejection message the helper emits for a malformed NAME (not a missing
+// systemctl). If a valid name slipped through the gate, none of these appear.
+const NAME_REJECTION = /usage|exactly one|illegal character|namespace|empty token|too long/i;
+
+test('reaper: rejects zero arguments', () => {
+  const r = runReaper([]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /usage|exactly one/i);
+});
+
+test('reaper: rejects MORE than one argument — the two-token PoC (`stop ssh.service`) dies on arg count', () => {
+  // Carnot's PoC was `systemctl stop stage-reader-ok ssh.service`. Against the
+  // helper that arrives as TWO args → $# != 1 → rejected before any action.
+  const r = runReaper(['stage-reader-ok', 'ssh.service']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /usage|exactly one/i);
+});
+
+test('reaper: rejects an embedded space — the one-arg form of the PoC', () => {
+  // Same PoC squeezed into ONE arg. The charset check rejects the space, so it can
+  // never be re-split into `<unit> ssh.service` by anything downstream.
+  const r = runReaper(['stage-reader-ok ssh.service']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /illegal character/i);
+});
+
+test('reaper: rejects a unit outside the stage-reader-* namespace', () => {
+  const r = runReaper(['ssh.service']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /namespace/i);
+});
+
+test('reaper: rejects the bare prefix with an empty token (enforces the `+` in the regex)', () => {
+  const r = runReaper(['stage-reader-']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /namespace|empty token/i);
+});
+
+test('reaper: rejects path-traversal / slash bytes in the name', () => {
+  for (const bad of ['stage-reader-../evil', 'stage-reader-x/y', 'stage-reader-a;b']) {
+    const r = runReaper([bad]);
+    assert.notEqual(r.code, 0, `must reject ${bad}`);
+    assert.match(r.stderr, /illegal character/i, `${bad} → illegal character`);
+  }
+});
+
+test('reaper: rejects an over-long name', () => {
+  const r = runReaper(['stage-reader-' + 'a'.repeat(300)]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /too long/i);
+});
+
+test('reaper: ACCEPTS a valid stage-reader-<token> name (passes the gate; env-aware)', () => {
+  // The full wrapper charset: alnum + : . _ - . A valid name must NOT be rejected
+  // for a name reason. On Linux/CI it exits 0 (no-op on an absent unit); on macOS
+  // it dies "systemctl not found" — neither is a name rejection.
+  for (const ok of ['stage-reader-sp1-aaaa1111', 'stage-reader-sp1:run.42_x-y']) {
+    const r = runReaper([ok]);
+    assert.doesNotMatch(r.stderr, NAME_REJECTION, `${ok} must pass the name gate`);
+    if (r.code !== 0) {
+      // The ONLY acceptable non-zero for a valid name is the no-systemctl host.
+      assert.match(r.stderr, /systemctl not found/i, `${ok}: only systemctl-absent may fail it`);
+    }
+  }
+});

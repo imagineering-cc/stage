@@ -86,11 +86,17 @@ if [ -z "${CLAUDE_BIN:-}" ]; then
   done
   if [ -n "${CLAUDE_BIN:-}" ]; then
     real="$(readlink -f -- "$CLAUDE_BIN" 2>/dev/null || printf '%s' "$CLAUDE_BIN")"
-    # Bind the symlink path itself, the resolved binary, and the resolved
-    # binary's whole install root (covers the versions/<ver>/ tree).
+    # Bind the symlink path itself, the resolved binary, and the resolved binary's
+    # own dir. NARROWED (round-3 MED): bind ONLY the versions/<ver>/ subtree, never
+    # the whole ~/.local/share/claude tree, so the caged claude cannot Read/Grep the
+    # rest of the install root. Extract `.../versions/<ver>` from the resolved path.
     CLAUDE_BINDS=("$CLAUDE_BIN" "$real" "$(dirname -- "$real")")
-    # If claude is the ~/.local layout, also bind the shared versions tree.
-    [ -d /home/nick/.local/share/claude ] && CLAUDE_BINDS+=(/home/nick/.local/share/claude)
+    case "$real" in
+      */versions/*)
+        ver_rest="${real#*/versions/}"
+        CLAUDE_BINDS+=("${real%%/versions/*}/versions/${ver_rest%%/*}")
+        ;;
+    esac
   fi
 fi
 

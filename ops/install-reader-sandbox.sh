@@ -31,6 +31,11 @@ READER_CLONES="${SCRATCH_ROOT}/clones"
 
 WRAPPER_SRC="${SCRIPT_DIR}/stage-reader-run"
 WRAPPER_DST='/usr/local/sbin/stage-reader-run'
+# The root-owned kill-path reaper helper (round-3 HIGH — replaces the wildcard
+# `systemctl stop|kill stage-reader-*` sudoers grant with a single validating
+# helper that sudo grants by FIXED PATH).
+REAPER_SRC="${SCRIPT_DIR}/stage-reader-reap"
+REAPER_DST='/usr/local/sbin/stage-reader-reap'
 SUDOERS_DST='/etc/sudoers.d/stage-reader'
 NFT_SRC="${SCRIPT_DIR}/stage-reader-nftables.conf"
 # Root-owned config the wrapper sources for the RESOLVED claude binary + its
@@ -53,6 +58,7 @@ for tool in useradd setfacl install visudo nft realpath; do
 done
 
 [[ -f "${WRAPPER_SRC}" ]] || { printf 'Missing %s\n' "${WRAPPER_SRC}" >&2; exit 1; }
+[[ -f "${REAPER_SRC}" ]] || { printf 'Missing %s\n' "${REAPER_SRC}" >&2; exit 1; }
 [[ -f "${NFT_SRC}" ]] || { printf 'Missing %s\n' "${NFT_SRC}" >&2; exit 1; }
 
 # ── 1. the stage-reader system user (no login, no home of its own) ────────────
@@ -109,15 +115,27 @@ else
   CLAUDE_REAL_DIR="$(dirname -- "${CLAUDE_REAL}")"
   printf 'claude shim:     %s\n' "${CLAUDE_LINK}"
   printf 'claude resolved: %s\n' "${CLAUDE_REAL}"
-  # Bind set: the shim path itself, the resolved binary, the resolved binary's
-  # whole install dir (covers versions/<ver>/), and the shared claude install
-  # root if this is the ~/.local layout. Each bound read-only with a `-` (optional)
-  # prefix at run time. node is /usr/bin/node → already under the wrapper's /usr/bin
-  # bind; if claude bundles its own node it lives under CLAUDE_REAL_DIR (also bound).
-  binds=("${CLAUDE_LINK}" "${CLAUDE_REAL}" "${CLAUDE_REAL_DIR}")
-  for extra in /home/nick/.local/share/claude /usr/local/share/claude /usr/share/claude; do
-    [[ -d "${extra}" ]] && binds+=("${extra}")
-  done
+  # node is /usr/bin/node → already under the wrapper's /usr/bin bind; if claude
+  # bundles its own node it lives under the version dir (bound below).
+  # MED (round-3): bind ONLY the resolved versions/<ver>/ subtree, NOT the whole
+  # ~/.local/share/claude tree. The caged (attacker-influenced) claude can
+  # Read/Grep/Glob anything bound in, so we narrow it to exactly the version
+  # directory needed to execute. Extract `.../versions/<ver>` from the resolved
+  # binary path; if the layout isn't versioned, fall back to the binary's own dir.
+  case "${CLAUDE_REAL}" in
+    */versions/*)
+      _ver_rest="${CLAUDE_REAL#*/versions/}"                       # <ver>/.../claude
+      CLAUDE_VER_DIR="${CLAUDE_REAL%%/versions/*}/versions/${_ver_rest%%/*}"
+      ;;
+    *) CLAUDE_VER_DIR="${CLAUDE_REAL_DIR}" ;;
+  esac
+  printf 'claude version dir (bound): %s\n' "${CLAUDE_VER_DIR}"
+  # Bind set: the shim path, the resolved binary, the resolved binary's own dir,
+  # and the versions/<ver> subtree (covers the JS bundle + bundled node). We do
+  # NOT bind the parent share/claude tree. If a host's layout needs more, the
+  # on-Pi cage smoke (ops/reader-sandbox.md) fails LOUDLY — widen with evidence,
+  # never speculatively.
+  binds=("${CLAUDE_LINK}" "${CLAUDE_REAL}" "${CLAUDE_REAL_DIR}" "${CLAUDE_VER_DIR}")
   # De-dup while preserving order (portable — no associative arrays, works on the
   # Pi's bash and on an old bash 3.2 alike).
   uniq=()
@@ -144,11 +162,22 @@ say "3b. wrapper ${WRAPPER_DST}"
 sudo install -o root -g root -m 0755 "${WRAPPER_SRC}" "${WRAPPER_DST}"
 printf 'installed %s (root:root 0755 — nick cannot edit it)\n' "${WRAPPER_DST}"
 
+# ── 3c. the root-owned kill-path reaper helper (NOT writable by nick) ──────────
+# round-3 HIGH: reader.js's timeout reaper used to run `sudo -n systemctl stop|kill
+# stage-reader-*` under a WILDCARD sudoers grant on a general tool. We replace that
+# with this single-purpose helper: it validates the unit name (^stage-reader-…$,
+# one arg) and runs stop+kill itself. Installed root:root 0755 so nick cannot edit
+# the program he is trusted to run as root (same discipline as the wrapper).
+say "3c. reaper helper ${REAPER_DST}"
+sudo install -o root -g root -m 0755 "${REAPER_SRC}" "${REAPER_DST}"
+printf 'installed %s (root:root 0755 — nick cannot edit it)\n' "${REAPER_DST}"
+
 # ── 4. the NOPASSWD sudoers drop-in (validated with visudo -c) ────────────────
-# nick may run ONLY the wrapper as root, NOPASSWD. The wrapper's arg-validation
-# is the real gate (see its header). We write to a temp file, validate with
-# `visudo -c`, and ONLY install if valid — a malformed sudoers file can lock out
-# sudo entirely, so we never install an unchecked one.
+# nick may run ONLY the two pinned helpers as root, NOPASSWD — the wrapper (read)
+# and the reaper (teardown). Each helper's own arg-validation is the real gate
+# (see their headers). We write to a temp file, validate with `visudo -c`, and
+# ONLY install if valid — a malformed sudoers file can lock out sudo entirely, so
+# we never install an unchecked one.
 say "4. sudoers drop-in ${SUDOERS_DST}"
 # FIX E (cage-match): VALIDATE BEFORE INSTALL. A malformed file in
 # /etc/sudoers.d/ can lock out sudo entirely, so we never let an unchecked file
@@ -156,43 +185,35 @@ say "4. sudoers drop-in ${SUDOERS_DST}"
 # `install` into /etc/sudoers.d/ if it parses. (The earlier order installed first,
 # then validated — leaving a window where a bad file was live.)
 #
-# The grant runs ONLY the pinned wrapper. The wrapper hardcodes the claude
-# command + read-only flags and accepts ONLY a clone dir (FIX B), so this grant
-# is genuinely "run THE reader operation", not "run anything as stage-reader".
+# Grant 1 runs ONLY the pinned wrapper. The wrapper hardcodes the claude
+# command + read-only flags and accepts ONLY a clone dir (FIX B), so it is
+# genuinely "run THE reader operation", not "run anything as stage-reader".
 # The `*` covers the single clone-dir argument; the wrapper re-validates it.
-# (round-2 HIGH 1) The kill-path reaper in reader.js runs `sudo -n systemctl
-# stop/kill stage-reader-<unit>` as a backstop to the signal chain. The wrapper
-# grant alone does NOT authorize that, so without a second grant the reaper is a
-# silently-swallowed no-op. Add a NARROW, validated grant for EXACTLY the reaper
-# verbs scoped to `stage-reader-*` units. Resolve systemctl's absolute path (it
-# varies: /usr/bin on Bookworm, /bin a compat symlink — grant both that exist).
-SYSTEMCTL="$(command -v systemctl 2>/dev/null || echo /usr/bin/systemctl)"
-SYSTEMCTL_REAL="$(readlink -f -- "${SYSTEMCTL}" 2>/dev/null || echo "${SYSTEMCTL}")"
-printf 'systemctl resolved to: %s (real: %s)\n' "${SYSTEMCTL}" "${SYSTEMCTL_REAL}"
+# round-3 HIGH — grant 2, the kill-path reaper, is now a single-purpose, root-owned
+# VALIDATING helper (stage-reader-reap), NOT a wildcard grant on the general
+# `systemctl`. nick may run ONLY the fixed reaper path; the helper itself
+# validates the unit name (^stage-reader-…$, exactly one arg) and runs `systemctl
+# stop|kill` internally. So sudo grants a BOUNDED program by fixed path — even a
+# permissive `*` cannot widen what the reaper is able to touch (unlike the old
+# `systemctl stop stage-reader-*` glob on a general tool). The helper resolves
+# systemctl's absolute path itself, so the installer no longer needs to.
 SUDOERS_TMP="$(mktemp)"
 trap 'rm -f "${SUDOERS_TMP}"' EXIT
-{
-cat <<EOF
+cat >"${SUDOERS_TMP}" <<EOF
 # Installed by ops/install-reader-sandbox.sh — The Reader OS sandbox (Slice 8).
-# nick may run ONLY the stage-reader wrapper as root, without a password, so the
-# stage-server (running as nick) can drop privilege to stage-reader for a read.
-# The wrapper PINS the command (claude + fixed read-only flags) and accepts only
-# a clone dir, which it re-validates — THAT is the trust boundary, not this glob.
+# nick may run ONLY the two pinned stage-reader helpers as root, without a
+# password, so the stage-server (running as nick) can drop privilege for a read
+# and tear the cage down on timeout. Each helper is the real gate; these globs
+# only grant REACHABILITY, the programs re-validate their arguments.
+#
+# 1) The wrapper PINS the command (claude + fixed read-only flags) and accepts
+#    only a clone dir, which it re-validates — THAT is the trust boundary.
 ${RUN_USER} ALL=(root) NOPASSWD: ${WRAPPER_DST} *
 
-# round-2 HIGH 1 — the kill-path reaper. NARROW: only \`systemctl stop|kill\` of
-# units named stage-reader-* (never a blanket systemctl). Lets reader.js tear the
-# transient cage unit down directly on timeout instead of relying on the signal
-# chain alone. Scoped to the reaper verbs + the stage-reader-* unit glob.
-${RUN_USER} ALL=(root) NOPASSWD: ${SYSTEMCTL} stop stage-reader-*, ${SYSTEMCTL} kill stage-reader-*
+# 2) The reaper validates the unit name and runs systemctl stop|kill on that ONE
+#    unit. Single-purpose program → no wildcard on a general tool (round-3 HIGH).
+${RUN_USER} ALL=(root) NOPASSWD: ${REAPER_DST} *
 EOF
-# If systemctl's real path differs from the PATH-resolved one, grant it too so
-# the reaper works regardless of which the spawn resolves.
-if [[ "${SYSTEMCTL_REAL}" != "${SYSTEMCTL}" ]]; then
-  printf '%s ALL=(root) NOPASSWD: %s stop stage-reader-*, %s kill stage-reader-*\n' \
-    "${RUN_USER}" "${SYSTEMCTL_REAL}" "${SYSTEMCTL_REAL}"
-fi
-} >"${SUDOERS_TMP}"
 # Lock the temp file down to root before validating/installing.
 sudo chown root:root "${SUDOERS_TMP}"
 sudo chmod 0440 "${SUDOERS_TMP}"

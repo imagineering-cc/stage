@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#
+# stage-reader-reap — root-owned reaper for The Reader's transient cage units.
+# The SECOND (and only other) thing nick is permitted to run as root via a
+# NOPASSWD sudoers drop-in, alongside stage-reader-run.
+#
+# ── WHY THIS EXISTS (cage-match round 3, HIGH) ────────────────────────────────
+# reader.js times out a wedged read by tearing down the transient systemd unit
+# the cage runs in (`systemd-run --unit=stage-reader-<token>`). That teardown
+# needs root (the unit is owned by the system manager). The round-2 design
+# authorized it with a WILDCARD sudoers grant:
+#     nick ALL=(root) NOPASSWD: <systemctl> stop stage-reader-*, <systemctl> kill stage-reader-*
+# A wildcard grant on a GENERAL-PURPOSE tool (systemctl) is a known footgun:
+# sudo's `*` spans spaces and argument boundaries, so reasoning about what it
+# does or doesn't authorize is fragile (the flagged PoC was
+# `systemctl stop stage-reader-ok ssh.service`). We do not lean on "probably
+# safe" for a sudo grant.
+#
+# The fix moves validation OUT of sudoers (which can only glob) and INTO this
+# single-purpose helper. Sudo now grants ONLY this fixed path — and this program
+# can do exactly ONE bounded thing: stop+kill ONE charset-validated
+# stage-reader-* unit. Even if the sudoers `*` admits odd argv, the WORST this
+# program will do is reject it; it has no path to touching any other unit.
+#
+# ── THE TRUST BOUNDARY: ONE ARG, STRICT NAME, FIXED ACTION ────────────────────
+# The sudoers rule is `nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-reap *`.
+# This script enforces the real gate by:
+#   1. Accepting EXACTLY ONE argument — the unit name. Anything else → reject.
+#   2. Requiring that name to match `^stage-reader-[A-Za-z0-9:_.-]+$` exactly —
+#      the wrapper's own unit charset, with a non-empty token. A space, slash,
+#      or any other byte → reject. This single-arg + charset gate kills BOTH
+#      vectors against the old wildcard grant:
+#        - `stage-reader-ok ssh.service` passed as ONE arg → contains a space →
+#          fails the charset check → rejected.
+#        - `stage-reader-ok ssh.service` passed as TWO args → $# != 1 → rejected.
+#   3. HARDCODING the action: `systemctl stop` then `systemctl kill` of that one
+#      validated unit. The caller cannot choose the verb or the tool.
+#
+# ── WHY THE NAME IS A SUFFICIENT "READER-CREATED" PROOF ───────────────────────
+# Carnot asked the helper to verify the unit is reader-created, not just
+# reader-NAMED. The `stage-reader-*` namespace IS that proof: the only units in
+# it are the transient units this project's root wrapper (stage-reader-run)
+# creates via `systemd-run --unit=stage-reader-<token>`. Stage's other units are
+# `stage-server.service` / `stage-kiosk.service` — different names, not in this
+# namespace. Putting a DIFFERENT meaningful unit into `stage-reader-*` requires
+# creating a system unit, which already needs root (the unprivileged stage-server
+# running as nick cannot). So name-namespace membership, given that unit creation
+# is privileged, is equivalent to reader-created. A runtime `Transient=yes` probe
+# was considered and DELIBERATELY omitted: it guards nothing additionally
+# reachable, and it would mis-fire on the common race where the unit is already
+# gone (stop/kill of a vanished unit is a harmless no-op we still want to attempt).
+#
+# Run by: reader.js → `sudo -n /usr/local/sbin/stage-reader-reap <unit>` on the
+#         read-timeout path (best-effort; errors are swallowed by the caller).
+# Installed by: ops/install-reader-sandbox.sh (root-owned, mode 0755, NOT writable
+# by nick — so nick cannot edit the very thing he's trusted to run as root).
+#
+set -euo pipefail
+
+die() { printf 'stage-reader-reap: %s\n' "$1" >&2; exit 64; }
+
+# ── 1. argument shape — EXACTLY one argument (the unit name) ──────────────────
+[ "$#" -eq 1 ] || die "usage: stage-reader-reap <unit>   (exactly one stage-reader-* unit, NO other args)"
+UNIT="$1"
+
+# ── 2. strict unit-name validation: ^stage-reader-[A-Za-z0-9:_.-]+$ ───────────
+# Length cap first (defends against a pathological argv).
+[ "${#UNIT}" -le 256 ] || die "unit name too long"
+# Must start with the reader namespace prefix AND carry a non-empty token after
+# it (the `+` in the regex). Stripping the prefix must actually change the value.
+TOKEN="${UNIT#stage-reader-}"
+{ [ "$TOKEN" != "$UNIT" ] && [ -n "$TOKEN" ]; } \
+  || die "refusing: unit not in the stage-reader-* namespace (or empty token): $UNIT"
+# Every byte of the FULL name must be in the systemd-safe charset the wrapper
+# emits. This is what rejects the embedded-space / extra-token PoC vectors.
+case "$UNIT" in
+  *[!A-Za-z0-9:_.-]*) die "refusing: unit name has an illegal character: $UNIT" ;;
+esac
+
+# ── 3. resolve systemctl from a FIXED candidate list (never $PATH; we are root) ─
+SYSTEMCTL=''
+for cand in /usr/bin/systemctl /bin/systemctl; do
+  [ -x "$cand" ] && { SYSTEMCTL="$cand"; break; }
+done
+[ -n "$SYSTEMCTL" ] || die "systemctl not found at /usr/bin or /bin"
+
+# ── 4. the fixed action: stop (graceful) then kill (hard), this ONE unit only ──
+# Best-effort: a unit that is already gone makes these no-ops. We swallow errors
+# here too so a vanished unit yields exit 0 (the reaper is a backstop, not a gate).
+"$SYSTEMCTL" stop "$UNIT" 2>/dev/null || true
+"$SYSTEMCTL" kill "$UNIT" 2>/dev/null || true
+exit 0

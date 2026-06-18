@@ -71,7 +71,7 @@ reader.js (as nick)
   │  git clone  (as nick — all network is nick's)
   │  spawn: sudo -n /usr/local/sbin/stage-reader-run <cloneDir>   (prompt on stdin)
   ▼
-sudo (NOPASSWD, ONE pinned command)
+sudo (NOPASSWD, two pinned helper paths: stage-reader-run + stage-reader-reap)
   ▼
 /usr/local/sbin/stage-reader-run   (root-owned 0755, NOT writable by nick)
   │  validates cloneDir is under /var/lib/stage-reader/clones (realpath, no ../symlink)
@@ -234,23 +234,31 @@ Node child.kill('SIGTERM')
 **cage-match FIX C — don't depend on the signal chain alone.** If sudo
 signal-forwarding or `systemd-run --wait` behaves differently on the Pi, the
 contained claude could survive the Node timeout. So in sandbox mode reader.js
-ALSO fires a **best-effort** `sudo -n systemctl stop <unit>` (then `… kill
-<unit>`) at the deterministic transient unit name — a direct, cgroup-scoped
-teardown that does not rely on the signal reaching the workload. It's best-effort
-(errors swallowed: the unit may already be gone, or the dev box may lack the
-privilege) and the unit name is deterministic (`stage-reader-<clone-basename>`).
-Node's `SIGKILL` to `sudo` is the last-resort reaper of the sudo/systemd-run
-layer; a stray transient unit is `--collect`-cleaned regardless.
+ALSO fires a **best-effort** teardown of the deterministic transient unit — a
+direct, cgroup-scoped kill that does not rely on the signal reaching the
+workload. It's best-effort (errors swallowed: the unit may already be gone, or
+the dev box may lack the privilege) and the unit name is deterministic
+(`stage-reader-<run-token>`). Node's `SIGKILL` to `sudo` is the last-resort
+reaper of the sudo/systemd-run layer; a stray transient unit is `--collect`-cleaned
+regardless.
 
-> **round-2 HIGH 1 — the reaper IS now authorized.** The earlier draft left the
-> `sudo -n systemctl …` reaper unauthorized, so it was a silently-swallowed no-op
-> (a nominal FIX C that fell back to the signal chain it was meant to backstop).
-> `install-reader-sandbox.sh` now installs a **second, narrow** sudoers grant —
-> `nick ALL=(root) NOPASSWD: <systemctl> stop stage-reader-*, <systemctl> kill
-> stage-reader-*` (the installer resolves systemctl's absolute path; it grants
-> both the PATH-resolved and `readlink -f` real paths if they differ). Scoped to
-> `stage-reader-*` units and the two reaper verbs ONLY — never a blanket
-> `systemctl`. The reaper now genuinely tears the cage unit down on timeout.
+> **round-3 HIGH — the reaper is a validating helper, not a wildcard grant.** The
+> round-2 draft authorized the reaper with a WILDCARD sudoers grant on the general
+> `systemctl` tool — `nick ALL=(root) NOPASSWD: <systemctl> stop stage-reader-*,
+> <systemctl> kill stage-reader-*`. Wildcard grants on a general tool are a
+> footgun (sudo's `*` spans spaces and arg boundaries; reasoning about what it
+> admits is fragile). That grant is **gone**. reader.js now calls a single-purpose
+> root-owned helper instead: `sudo -n /usr/local/sbin/stage-reader-reap <unit>`.
+> The helper (`ops/stage-reader-reap`, root:root 0755) accepts EXACTLY one
+> argument, validates it against `^stage-reader-[A-Za-z0-9:_.-]+$` (the wrapper's
+> own unit charset, non-empty token), then runs `systemctl stop|kill` on that one
+> unit itself. The sudoers grant is now just `nick ALL=(root) NOPASSWD:
+> /usr/local/sbin/stage-reader-reap *` — a BOUNDED program by fixed path. Even if
+> the `*` admits odd argv, the worst the helper does is reject it; it has no path
+> to any other unit. (The `stage-reader-*` namespace is the reader-created proof:
+> the only units in it are this project's transient cage units, and creating a
+> system unit with that name already needs root.) The reaper still genuinely
+> tears the cage unit down on timeout.
 >
 > **Unique unit name (round-2 MED):** the unit is
 > `stage-reader-<run-token>` where `<run-token>` is the per-run
@@ -298,23 +306,29 @@ sudo install -d -o stage-reader -g stage-reader -m 0700 /var/lib/stage-reader/ru
 # 3. resolve the REAL claude tree → /etc/stage-reader/binds.conf (round-2 HIGH 2)
 #    claude is a SHIM (~/.local/bin/claude → ~/.local/share/claude/versions/<ver>/);
 #    bind the resolved tree, not just the shim, or claude won't load in the cage.
+#    round-3 MED: bind ONLY the versions/<ver>/ subtree, NOT the whole
+#    ~/.local/share/claude tree (the caged claude can Read/Grep whatever is bound).
 LINK="$(command -v claude)"; REAL="$(readlink -f "$LINK")"
+case "$REAL" in */versions/*) VER="${REAL%%/versions/*}/versions/$(x="${REAL#*/versions/}"; printf '%s' "${x%%/*}")";; *) VER="$(dirname "$REAL")";; esac
 sudo install -d -o root -g root -m 0755 /etc/stage-reader
 printf 'CLAUDE_BIN=%q\nCLAUDE_BINDS=( %q %q %q %q )\n' \
-  "$LINK" "$LINK" "$REAL" "$(dirname "$REAL")" "$HOME/.local/share/claude" \
+  "$LINK" "$LINK" "$REAL" "$(dirname "$REAL")" "$VER" \
   | sudo tee /etc/stage-reader/binds.conf >/dev/null
 sudo chmod 0644 /etc/stage-reader/binds.conf
 
 # 3b. the root-owned wrapper (NOT writable by nick)
 sudo install -o root -g root -m 0755 ~/stage/ops/stage-reader-run /usr/local/sbin/stage-reader-run
 
-# 4. the NOPASSWD sudoers drop-in — VALIDATE BEFORE INSTALL (FIX E). TWO grants:
-#    the pinned wrapper, AND the narrow kill-path reaper (round-2 HIGH 1) scoped
-#    to `systemctl stop|kill stage-reader-*` only. Resolve systemctl's abs path.
-SCTL="$(command -v systemctl)"
+# 3c. the root-owned kill-path reaper helper (round-3 HIGH; NOT writable by nick)
+sudo install -o root -g root -m 0755 ~/stage/ops/stage-reader-reap /usr/local/sbin/stage-reader-reap
+
+# 4. the NOPASSWD sudoers drop-in — VALIDATE BEFORE INSTALL (FIX E). TWO grants,
+#    each a PINNED helper path (round-3 HIGH): the wrapper, AND the validating
+#    kill-path reaper. No wildcard on a general tool — the reaper helper validates
+#    its own unit-name argument and runs `systemctl stop|kill` internally.
 TMP="$(mktemp)"; sudo chown root:root "$TMP"; sudo chmod 0440 "$TMP"
 { printf 'nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-run *\n'
-  printf 'nick ALL=(root) NOPASSWD: %s stop stage-reader-*, %s kill stage-reader-*\n' "$SCTL" "$SCTL"
+  printf 'nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-reap *\n'
 } | sudo tee "$TMP" >/dev/null
 sudo visudo -cf "$TMP"                            # MUST print "parsed OK" — abort if not
 sudo install -o root -g root -m 0440 "$TMP" /etc/sudoers.d/stage-reader
@@ -408,15 +422,23 @@ is checked on the Pi, the OS confinement is **claimed, not verified**.
    - the per-run scratch dir under `/var/lib/stage-reader/clones/` is **wiped**.
    If it returns null: check `journalctl` for the transient unit and
    `cat /etc/stage-reader/binds.conf` — the claude install tree is the usual cause.
-6. **Timeout path + reaper authorization (round-2 HIGH 1).** Set
-   `STAGE_READER_TIMEOUT_MS=2000`, point at a larger repo, confirm the run is
-   killed and the cage unit torn down within a few seconds. Then confirm the
-   reaper grant actually works (not a swallowed no-op):
+6. **Timeout path + reaper authorization (round-3 HIGH — the validating helper).**
+   Set `STAGE_READER_TIMEOUT_MS=2000`, point at a larger repo, confirm the run is
+   killed and the cage unit torn down within a few seconds. Then confirm the reaper
+   HELPER is authorized (not a swallowed no-op) AND that it rejects coercion:
    ```bash
-   sudo -n systemctl stop stage-reader-nonexistent   # EXPECT: authorized (no
-   # password prompt, exits 0/"unit not loaded") — NOT "a password is required"
-   # or "not allowed". A password/denied error means the reaper grant is missing.
-   sudo grep -n 'systemctl .* stage-reader-\*' /etc/sudoers.d/stage-reader  # the grant
+   # authorized + accepts a valid name (no-op on an absent unit → exit 0):
+   sudo -n /usr/local/sbin/stage-reader-reap stage-reader-nonexistent
+   #   EXPECT: no password prompt, exits 0. "a password is required"/"not allowed"
+   #   means the grant is missing.
+   # rejects the coercion PoCs (each MUST print "stage-reader-reap: refusing/usage…"
+   # and exit 64 — the helper, NOT systemctl, is the gate):
+   sudo -n /usr/local/sbin/stage-reader-reap stage-reader-ok ssh.service   # 2 args
+   sudo -n /usr/local/sbin/stage-reader-reap 'stage-reader-ok ssh.service' # embedded space
+   sudo -n /usr/local/sbin/stage-reader-reap ssh.service                   # wrong namespace
+   # and the grant is the FIXED helper path, NOT a wildcard on systemctl:
+   sudo grep -n 'stage-reader-reap' /etc/sudoers.d/stage-reader
+   ! sudo grep -q 'systemctl .* stage-reader-\*' /etc/sudoers.d/stage-reader && echo "no wildcard systemctl grant (good)"
    ```
 7. **Unit names are unique per run (round-2 MED).** Kick two reads (or inspect a
    prior run's journal) and confirm the transient units differ —
@@ -424,7 +446,7 @@ is checked on the Pi, the OS confinement is **claimed, not verified**.
 
 ## What is verified now vs. unverified-until-Pi
 
-**Verified now (in CI / on this branch — 35 `reader.test.js` tests + 36 smoke):**
+**Verified now (in CI / on this branch — 43 `reader.test.js` tests + 36 smoke):**
 - Direct-mode (opt-out) behaviour is unchanged.
 - **Fail-safe polarity (FIX F):** `buildSpawn` with NO env selects the cage
   (`command === 'sudo'`), not direct.
@@ -444,6 +466,12 @@ is checked on the Pi, the OS confinement is **claimed, not verified**.
   (On the macOS CI-author box the out-of-`clones/` rejection fires one line early
   via BSD `realpath` lacking `-e`; the GNU `realpath -e` containment message is a
   Pi-only check — see below.)
+- **Reaper helper rejects subversion (round-3 HIGH):** shell-level tests drive the
+  real `ops/stage-reader-reap` and confirm it accepts a valid `stage-reader-<token>`
+  name (full `:._-` charset) but rejects 0 args, >1 arg (the two-token PoC), an
+  embedded space (the one-arg PoC), a wrong namespace, the bare prefix (empty
+  token), slash/`..`/`;` bytes, and an over-long name. The sudoers grant is the
+  FIXED helper path, validated by `visudo -cf` — NO wildcard on `systemctl`.
 - No OAuth token / no `ANTHROPIC_API_KEY` rides through sudo; the cost-abort
   survives in sandbox mode; minimal `{PATH}` env; deterministic unit name.
 - The wrapper and installer pass `bash -n`; sudoers validated by `visudo -cf` on
@@ -468,12 +496,13 @@ the load-bearing security claims, CLAIMED not verified until the checklist runs:
   designed and the conf round-trips in a local shell test, but whether the Pi's
   specific shim+versions layout binds *completely* enough for claude to load is
   the load-bearing unverified claim. A null finding here = a broken cage.
-- **That the reaper grant is authorized** (round-2 HIGH 1, checklist item 6): the
-  installer adds the narrow `systemctl stop|kill stage-reader-*` sudoers rule, but
-  `sudo -n systemctl …` succeeding (vs. password-prompting / denied) is on-Pi.
+- **That the reaper helper is authorized** (round-3 HIGH, checklist item 6): the
+  installer grants the FIXED `/usr/local/sbin/stage-reader-reap *` path, but
+  `sudo -n stage-reader-reap …` succeeding (vs. password-prompting / denied), and
+  the helper's stop/kill actually reaching a live unit, are on-Pi.
 - That the allowlist filesystem (item 2 — `/home/nick` AND sibling clones absent),
   the egress port-filter (item 3), run-as-stage-reader (item 1), the pinned-command
-  rejection (item 0), and the SIGTERM→unit-stop + authorized `systemctl stop`
-  reaper (item 6) all behave as designed.
+  rejection (item 0), and the SIGTERM→unit-stop + authorized reaper-helper teardown
+  (item 6) all behave as designed.
 - The residual TOCTOU window on the clone dir (FIX D) is narrowed, not closed —
   see "Filesystem ownership + the TOCTOU window" above.
