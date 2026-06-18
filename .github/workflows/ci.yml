@@ -26,6 +26,11 @@ jobs:
       - name: Syntax-check the server
         run: node --check server.js
 
+      - name: Syntax-check the voice module
+        # voice.js (Dreamfinder's The Voice — two-minds Slice 2) is not yet wired
+        # into server.js, so the boot smoke test does not load it. Check it here.
+        run: node --check voice.js
+
       - name: Boot smoke test
         # Assert the HTTP server actually answers. STAGE_NO_AUDIO skips mpv on
         # code that supports it; a temp state file keeps the repo clean. The
@@ -51,6 +56,14 @@ jobs:
         # vote-ranked fair queue, idempotent vote toggle, spotlight archival —
         # so a refactor that breaks one turns CI red. STAGE_NO_AUDIO skips mpv.
         run: STAGE_NO_AUDIO=1 node test/smoke.js
+
+      - name: Voice governance + fallback unit suite
+        # Zero-dep node:test suite for voice.js. NEVER hits the live OpenAI API
+        # (there is no key here) — the live model path is unverified-without-a-key
+        # by design; this pins the VERIFIED surface: restraint governance (register
+        # table, per-event budget, cooldown), the bounded ring, the untrusted-data
+        # fence in the prompt builder, and the never-blank-by-error fallback.
+        run: STAGE_NO_AUDIO=1 node --test test/voice.test.js
 
   # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
   # validation passed — so untrusted PR code never reaches the Pi, and broken
