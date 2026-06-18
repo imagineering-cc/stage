@@ -38,12 +38,31 @@
 //      Any failure resolves to a null finding — NEVER throws to the caller, NEVER
 //      leaves a zombie. The caller's fallback chain (the no-repo quip) takes over.
 //
-// !!! UNTRUSTED-REPO CONSTRAINT (read before Slice 3 / production) !!!
-// The OS sandbox (Slice 8 — seccomp/namespaces under sudo) is NOT built yet.
-// Until it lands, reader.js confines the model to read-only TOOLS but does NOT
-// confine the model's *process* at the OS level. So it must be pointed ONLY at
-// TRUSTED repos for now. Do not point it at arbitrary attendee repos in
-// production until Slice 8 sandboxes the process.
+// === THE OS SANDBOX (Slice 8) — ON BY DEFAULT (fail-safe) ===
+// reader.js confines the model to read-only TOOLS, but the read-only tools are a
+// claude-CLI-level promise, not an OS-level one. The OS-level containment of the
+// *process* is Slice 8 (ops/reader-sandbox.md): by default the `claude` spawn is
+// routed through `sudo -n /usr/local/sbin/stage-reader-run <cloneDir>`, a root
+// wrapper that PINS the claude command, drops privilege to the unprivileged
+// `stage-reader` user, runs claude under a tight systemd confinement set with an
+// allowlist filesystem, and is backstopped by an nftables egress port-filter
+// (tcp/443 + dns only).
+//
+//   • PRODUCTION / Pi:  default (no flag)            → contained spawn (the cage).
+//   • CI / local dev:   STAGE_READER_UNSAFE_DIRECT=1 → direct spawn as nick, so
+//     the unit tests and a dev box without the sandbox installed still work.
+//
+// The gate is FAIL-SAFE (cage-match FIX F): a forgotten env var leaves the cage
+// ON. The only way to the unconfined path is to set STAGE_READER_UNSAFE_DIRECT=1
+// explicitly. (The earlier opt-IN polarity was fail-open: a missing flag ran the
+// agentic model unconfined as nick.)
+//
+// !!! UNTRUSTED-REPO CONSTRAINT !!!
+// Pointing The Reader at arbitrary attendee repos requires the sandbox INSTALLED
+// (ops/install-reader-sandbox.sh) — which is the default spawn path. Do NOT set
+// STAGE_READER_UNSAFE_DIRECT=1 in production. The cage-before-monster ordering:
+// this sandbox lands TOGETHER WITH reader.js (PR #31 + Slice 8 as one unit),
+// before any untrusted repo is read.
 
 const fs = require('fs');
 const os = require('os');
@@ -70,6 +89,32 @@ function numEnv(name, fallback) {
 // The claude binary. On the Pi it is ~/.local/bin/claude (on PATH for nick's
 // shell). Configurable so a different host can point elsewhere; default 'claude'.
 function claudeBin() { return process.env.STAGE_READER_CLAUDE_BIN || 'claude'; }
+// OS-sandbox gate (Slice 8). FAIL-SAFE polarity (cage-match FIX F): the sandbox
+// is ON BY DEFAULT. Production must be safe-by-default — a forgotten env var must
+// NOT silently run the agentic model unconfined as nick. The ONLY way to get the
+// direct (unconfined) spawn is to set STAGE_READER_UNSAFE_DIRECT=1 explicitly,
+// which CI/dev (no sandbox installed) sets. So:
+//   STAGE_READER_UNSAFE_DIRECT unset  → SANDBOX (the cage)        [default, prod]
+//   STAGE_READER_UNSAFE_DIRECT=1      → direct spawn as nick      [CI / local dev]
+// (The previous polarity — opt-IN sandbox via STAGE_READER_SANDBOX=1 — was
+// fail-OPEN: a missing flag ran claude unconfined. Inverted here.)
+function sandboxEnabled() { return process.env.STAGE_READER_UNSAFE_DIRECT !== '1'; }
+// The root wrapper path (configurable for tests; prod default is the installed
+// /usr/local/sbin path). Invoked as `sudo -n <wrapper> <cloneDir>` with the
+// trusted prompt on stdin — NO caller-controlled argv after the clone dir
+// (cage-match FIX B: the command + flags are pinned INSIDE the wrapper).
+function sandboxWrapper() {
+  return process.env.STAGE_READER_WRAPPER || '/usr/local/sbin/stage-reader-run';
+}
+// The sudo binary (configurable for tests; the wrapper requires root via NOPASSWD
+// sudoers). Default 'sudo'.
+function sudoBin() { return process.env.STAGE_READER_SUDO_BIN || 'sudo'; }
+// The root-owned reaper helper, for the best-effort kill-path teardown (cage-match
+// FIX C + round-3 HIGH). reader.js NEVER calls `systemctl` directly: it calls this
+// single-purpose helper, which validates the unit name and runs `systemctl
+// stop|kill` itself. The sudoers grant points at THIS path (no wildcard systemctl
+// args), so a permissive sudo glob cannot widen what the reaper can touch.
+function reaperBin() { return process.env.STAGE_READER_REAPER_BIN || '/usr/local/sbin/stage-reader-reap'; }
 // Where the OAuth token lives (gitignored, chmod 600). Read in node, never echoed.
 function tokenFile() {
   return process.env.STAGE_READER_TOKEN_FILE || path.join(__dirname, 'ops', 'reader.local.env');
@@ -82,7 +127,13 @@ function cloneMaxBytes() { return numEnv('STAGE_READER_CLONE_MAX_BYTES', 50 * 10
 // git clone wall-clock timeout.
 function cloneTimeoutMs() { return numEnv('STAGE_READER_CLONE_TIMEOUT_MS', 30000); }
 // Claude model run wall-clock timeout (SIGTERM, then SIGKILL after the grace).
-function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 60000); }
+// Default 180s: an AGENTIC read of a real repo on the Pi (Max-plan inference +
+// multiple Read/Grep/Glob tool round-trips) routinely exceeds 60s — verified
+// on-Pi 2026-06-19, where a 60s cap SIGTERM'd a real antirez/smallchat read to a
+// null finding while 240s produced a genuine multi-line finding. The Reader fires
+// on /share/admit and only needs to be ready by barge-in, so a longer ceiling is
+// free. Override per-deployment with STAGE_READER_TIMEOUT_MS.
+function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 180000); }
 // Grace between SIGTERM and SIGKILL (mirrors sprint.js's chime guard idea).
 function killGraceMs() { return numEnv('STAGE_READER_KILL_GRACE_MS', 3000); }
 
@@ -371,27 +422,108 @@ function cloneRepo(handle, repo, dest) {
   });
 }
 
+// The fixed read-only claude flags for DIRECT mode (CI/dev). In SANDBOX mode the
+// IDENTICAL flags are PINNED inside the wrapper, not passed from here — see FIX B.
+//   NOTE: deliberately NO `--bare` — it ignores CLAUDE_CODE_OAUTH_TOKEN and
+//   falls back to ANTHROPIC_API_KEY. Config isolation comes from the scoped
+//   HOME/CLAUDE_CONFIG_DIR (direct mode: childEnv; sandbox mode: the wrapper).
+// Direct mode passes the prompt as `-p <prompt>` argv (simplest for the local
+// dev/CI path); sandbox mode pipes the prompt via stdin (see buildSpawn / FIX B).
+function claudeArgsDirect() {
+  return [
+    '-p', HUNT_PROMPT,
+    '--output-format', 'json',
+    '--allowedTools', 'Read,Grep,Glob',
+    '--disallowedTools', 'Write,Edit,Bash,WebFetch,WebSearch',
+    '--permission-mode', 'dontAsk',
+  ];
+}
+
+// Build the spawn invocation for the current mode.
+//   SANDBOX (default — fail-safe, FIX F): spawn `sudo -n <wrapper> <cloneDir>`
+//     with NO caller-controlled argv after the clone dir (FIX B). The wrapper
+//     PINS the claude binary + read-only flags and reads the prompt from stdin,
+//     so the only thing the caller (nick) can influence is WHICH clone dir to
+//     read — not WHAT command runs as stage-reader. The wrapper drops to the
+//     stage-reader user, sets HOME/CLAUDE_CONFIG_DIR/cwd itself, and reads
+//     stage-reader's OWN OAuth token from its config dir — so we DELIBERATELY do
+//     NOT pass nick's childEnv or token through sudo (sudo strips env anyway).
+//     We hand `sudo` a clean minimal env (PATH) and NEVER ANTHROPIC_API_KEY.
+//     `stdinPrompt` is the trusted hunt prompt to write to the child's stdin.
+//   DIRECT (STAGE_READER_UNSAFE_DIRECT=1 — CI/dev): spawn `claude <args>` with
+//     cwd=cloneDir and the clean allowlist childEnv. Prompt is argv, stdin unused.
+//   Returns { command, args, spawnOpts, unit|null, stdinPrompt|null } — `unit` is
+//   the deterministic transient systemd unit name (sandbox only) so the kill-path
+//   can target it directly.
+function buildSpawn(cloneDir, childEnv) {
+  if (sandboxEnabled()) {
+    // UNIQUE-PER-RUN unit name (cage-match round-2 MED). cloneDir is always
+    // `<runDir>/clone`, so basename(cloneDir) === "clone" for EVERY run — a
+    // collision that would let the reaper target the wrong unit. Derive from the
+    // RUN dir (the parent), which carries the per-run `<spotlightId|rand>-<hex>`
+    // token. MUST match the wrapper's derivation exactly: it computes
+    // `basename(dirname(REAL_CLONE))`. The wrapper sanitises to the systemd unit
+    // charset; reader.js only ever produces safe tokens (safeSegment / hex), so
+    // the two agree on every real input.
+    const unit = `stage-reader-${path.basename(path.dirname(cloneDir))}`;
+    return {
+      command: sudoBin(),
+      // `sudo -n` (non-interactive): the NOPASSWD sudoers rule must apply, else
+      // fail fast rather than hang on a password prompt. EXACTLY one arg after
+      // the wrapper — the clone dir. No `--`, no claude argv: the command is
+      // pinned in the wrapper (FIX B). stdin (not argv) carries the prompt.
+      args: ['-n', sandboxWrapper(), cloneDir],
+      spawnOpts: {
+        // cwd is set INSIDE the cage by the wrapper (--working-directory); the
+        // sudo process itself can run from anywhere. Clean minimal env: the
+        // cost-safety re-check below guarantees no ANTHROPIC_API_KEY rides along.
+        env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin' },
+        // stdin is a PIPE so we can write the prompt; stdout/stderr captured.
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+      unit,
+      stdinPrompt: HUNT_PROMPT,
+    };
+  }
+  return {
+    command: claudeBin(),
+    args: claudeArgsDirect(),
+    spawnOpts: { cwd: cloneDir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+    unit: null,
+    stdinPrompt: null,
+  };
+}
+
 // ── the model run (spawn claude, bounded, parse, reap) ───────────────────────
 // Spawns claude read-only over the clone, captures stdout, enforces the wall
 // clock with SIGTERM→SIGKILL, and resolves to the parsed finding or null.
 function runClaude(cloneDir, childEnv) {
   return new Promise((resolve) => {
-    const args = [
-      '-p', HUNT_PROMPT,
-      '--output-format', 'json',
-      '--allowedTools', 'Read,Grep,Glob',
-      '--disallowedTools', 'Write,Edit,Bash,WebFetch,WebSearch',
-      '--permission-mode', 'dontAsk',
-      // NOTE: deliberately NO `--bare` — it ignores CLAUDE_CODE_OAUTH_TOKEN and
-      // falls back to ANTHROPIC_API_KEY. Config isolation comes from the scoped
-      // HOME/CLAUDE_CONFIG_DIR in childEnv instead.
-    ];
+    const { command, args, spawnOpts, unit, stdinPrompt } = buildSpawn(cloneDir, childEnv);
+    // Cost-safety, second gate: the sudo/wrapper path must NEVER carry an API
+    // key into the cage. buildChildEnv already threw if one is set in the server
+    // env, but assert again on the literal env we hand the spawn (belt + braces).
+    if (spawnOpts.env && 'ANTHROPIC_API_KEY' in spawnOpts.env) {
+      console.error('[READER] ANTHROPIC_API_KEY in spawn env; refusing');
+      return resolve(null);
+    }
     let child;
     try {
-      child = spawn(claudeBin(), args, { cwd: cloneDir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(command, args, spawnOpts);
     } catch (err) {
       console.error('[READER] claude spawn failed:', err.message);
       return resolve(null);
+    }
+
+    // SANDBOX mode: the prompt is trusted (reader.js-authored) but must reach
+    // claude as STDIN data, never as argv that could smuggle a flag (FIX B). The
+    // wrapper's pinned `claude -p --input-format text` reads it from stdin.
+    if (stdinPrompt != null && child.stdin) {
+      child.stdin.on('error', () => { /* child gone before we finished writing */ });
+      try {
+        child.stdin.write(stdinPrompt);
+        child.stdin.end();
+      } catch { /* child gone; the exit handler resolves */ }
     }
 
     let stdout = '';
@@ -410,12 +542,58 @@ function runClaude(cloneDir, childEnv) {
 
     // Wall-clock guard: SIGTERM, then SIGKILL after a grace window if the child
     // ignores the term (mirrors sprint.js's chime kill-guard pattern).
+    //
+    // KILL-PATH PROPAGATION TO THE CONTAINED CHILD (sandbox mode):
+    //   direct mode → `child` IS claude; child.kill reaches it directly.
+    //   sandbox mode → `child` is `sudo -n`, which exec'd into the wrapper, which
+    //   exec'd into `systemd-run --wait`. The chain on SIGTERM:
+    //     Node child.kill('SIGTERM')
+    //       → sudo forwards SIGTERM to its child (systemd-run)  [sudo ≥1.8.15]
+    //       → `systemd-run --wait` stops the transient unit on SIGTERM
+    //       → systemd sends SIGTERM to claude in the unit's cgroup, then SIGKILL
+    //         after the unit's TimeoutStopSec=5 (KillMode=mixed) — a HARD,
+    //         cgroup-scoped kill of the whole contained process tree.
+    //   So systemd itself owns the contained hard-kill; our SIGKILL fallback
+    //   below is a last-resort reaper of the sudo/systemd-run layer if THAT
+    //   wedges. (A stray transient unit is `--collect`-cleaned regardless.)
+    //
+    //   FIX C (cage-match): do NOT rely on sudo signal-forwarding +
+    //   `systemd-run --wait` alone. If either behaves differently on the Pi, the
+    //   contained claude could survive the Node timeout. So in sandbox mode we
+    //   ALSO fire a best-effort `systemctl stop <unit>` (and `systemctl kill`) at
+    //   the named transient unit — a direct, cgroup-scoped teardown that does not
+    //   depend on the signal chain reaching the workload. It is best-effort
+    //   (errors swallowed): the unit may already be gone, or systemctl may need
+    //   privilege the dev box lacks — neither should change the null-finding
+    //   outcome. This needs the system manager; a transient unit started via our
+    //   root sudo is owned by the system manager, so `sudo -n systemctl stop` is
+    //   the privileged form (also best-effort; a missing sudoers entry just makes
+    //   it a no-op, falling back to the signal chain above).
+    //
+    //   ROUND-3 HIGH: we do NOT run `sudo -n systemctl stop|kill stage-reader-*`
+    //   directly any more (that needed a WILDCARD sudoers grant on a general tool).
+    //   Instead we invoke the root-owned `stage-reader-reap` helper with the ONE
+    //   unit name; it validates the name and runs stop+kill itself. The sudoers
+    //   grant is scoped to the fixed helper path, so the reaper cannot be coerced
+    //   into touching any other unit regardless of how sudo matches the argument.
+    const reapUnit = () => {
+      if (!unit) return;
+      try {
+        const r = spawn(sudoBin(), ['-n', reaperBin(), unit], {
+          stdio: 'ignore',
+          env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin' },
+        });
+        r.on('error', () => { /* sudo/helper absent; best-effort */ });
+      } catch { /* best-effort */ }
+    };
     killTimer = setTimeout(() => {
       console.error('[READER] claude run timed out; SIGTERM');
       try { child.kill('SIGTERM'); } catch { /* gone */ }
+      reapUnit(); // FIX C: also tear down the transient unit directly
       graceTimer = setTimeout(() => {
         console.error('[READER] claude ignored SIGTERM; SIGKILL');
         try { child.kill('SIGKILL'); } catch { /* gone */ }
+        reapUnit(); // belt-and-braces hard reap
       }, killGraceMs());
     }, readTimeoutMs());
 
@@ -460,12 +638,20 @@ async function runReader({ handle, repo, spotlightId } = {}) {
     return { finding: null };
   }
 
-  // Read the OAuth token first — no token means no Max-plan path, so abort
-  // rather than risk any other auth route.
-  const oauthToken = readOAuthToken();
-  if (!oauthToken) {
-    console.error('[READER] declined: no CLAUDE_CODE_OAUTH_TOKEN available');
-    return { finding: null };
+  // OAuth token. In DIRECT mode the token comes from nick's gitignored
+  // ops/reader.local.env and is injected into the child env; no token → abort
+  // (no Max-plan path, and we never fall back to a metered route). In SANDBOX
+  // mode the contained `claude` authenticates as the SEPARATE stage-reader user
+  // from ITS OWN config dir (minted by `claude setup-token` as stage-reader and
+  // placed by install-reader-sandbox.sh) — nick's token is neither read nor
+  // passed through sudo, so we don't require it here.
+  let oauthToken = null;
+  if (!sandboxEnabled()) {
+    oauthToken = readOAuthToken();
+    if (!oauthToken) {
+      console.error('[READER] declined: no CLAUDE_CODE_OAUTH_TOKEN available');
+      return { finding: null };
+    }
   }
 
   // Per-run scratch dir. Prefer the configured scratch root if writable, else os.tmpdir().
@@ -483,7 +669,10 @@ async function runReader({ handle, repo, spotlightId } = {}) {
     fs.mkdirSync(configDir, { recursive: true });
 
     // Build the clean child env BEFORE cloning — the cost-safety assertion throws
-    // here if ANTHROPIC_API_KEY is set, aborting before we spend any work.
+    // here if ANTHROPIC_API_KEY is set, aborting before we spend any work. In
+    // SANDBOX mode this childEnv is NOT used by the spawn (the wrapper owns the
+    // cage's env + token); we still build it so the cost-safety assertion runs on
+    // every path, regardless of mode.
     const childEnv = buildChildEnv(homeDir, configDir, oauthToken);
 
     const cloned = await cloneRepo(handle, repo, cloneDir);
@@ -536,6 +725,7 @@ module.exports = {
   extractJsonObject,
   pathExistsInClone,
   buildChildEnv,
+  buildSpawn,
   dirSizeBytes,
   safeSegment,
   readOAuthToken,
