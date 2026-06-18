@@ -558,6 +558,22 @@ async function requestHandler(req, res) {
     if (id?.consentResearch !== true) {
       return send(res, 409, { error: 'participant has not consented to external research and analysis' });
     }
+    // M3 DOUBLE-SEARCH GUARD. Autonomous facilitation (fired by /api/spotlight/correct
+    // via maybeStartFacilitation) ALSO calls developSpotlightInsights — so the moment
+    // facilitation begins it stamps room.spotlight.facilitation (status 'research' →
+    // 'asked'/'dismissed'). That single ephemeral field is the authoritative "the
+    // expensive GitHub/arXiv/OpenAlex search has already run (or is in-flight) for THIS
+    // spotlight" witness. If it's present, this legacy host route must NOT kick off a
+    // SECOND full search — return whatever insights the autonomous path already built
+    // (null while still 'research', populated once 'asked'). No new flag: we reuse the
+    // facilitation state machine that maybeStartFacilitation already gates on.
+    if (room.spotlight.facilitation) {
+      return send(res, 200, {
+        insights: room.spotlight.insights || null,
+        spotlight: hostSpotlight(),
+        deduped: true,
+      });
+    }
     try {
       const insights = await developSpotlightInsights();
       return send(res, 200, { insights, spotlight: hostSpotlight() });

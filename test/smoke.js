@@ -1669,6 +1669,63 @@ test('m3: finish archives existing facilitation and does NOT re-run the search',
 });
 
 // ---------------------------------------------------------------------------
+// M3-5b. The legacy host route /api/spotlight/insights must NOT double-search.
+//        Once autonomous facilitation has stamped room.spotlight.facilitation
+//        (research already ran off /api/spotlight/correct), a host hitting the
+//        old "run analysis" control must be DEDUPED: it returns the existing
+//        insights WITHOUT kicking off a second GitHub/arXiv/OpenAlex search.
+//        Network-independent proof: a re-search would re-stamp insights.searchedAt
+//        (developSpotlightInsights always stamps it, even on empty fetches), so an
+//        UNCHANGED searchedAt is the witness that no second search ran. We also
+//        assert the explicit deduped:true flag on the guarded path.
+// ---------------------------------------------------------------------------
+test('m3: legacy /api/spotlight/insights is deduped once facilitation exists (no second search)', async () => {
+  await openEvent('M3 Insights Dedup');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true, research: true, title: 'Dedup Project' });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/correct', { token: A.token, transcript: 'final dedup report' });
+
+  // Autonomous facilitation runs ONCE off correct and settles to 'asked'. With
+  // research consent the pipeline stamps insights.searchedAt en route (even on
+  // empty fetches). This is the state in which a host's legacy "run analysis"
+  // press would PREVIOUSLY have triggered a SECOND full search. Capture the
+  // before-snapshot from the SAME frame the predicate fired on (avoids a snapshot
+  // race where a separately-opened SSE connection returns a transient frame).
+  let beforeSnap;
+  await waitForFacilitation((f, snap) => {
+    if (f && f.status === 'asked') { beforeSnap = snap; return true; }
+    return false;
+  }, { timeoutMs: 40000 });
+  const searchedAtBefore = beforeSnap.spotlight && beforeSnap.spotlight.insights
+    ? beforeSnap.spotlight.insights.searchedAt
+    : null;
+
+  // Hit the legacy route. The guard keys on room.spotlight.facilitation being
+  // present → it returns the EXISTING insights, deduped, without re-searching.
+  // This assertion is network-INDEPENDENT: once facilitation is 'asked', the
+  // guard fires regardless of what the fetches returned.
+  const res = await post('/api/spotlight/insights', {});
+  assert.equal(res.status, 200, 'legacy insights route returns 200 (no-op success, not an error)');
+  assert.equal(res.body.deduped, true, 'response is flagged as the deduped/guarded path');
+
+  // The decisive corroboration: searchedAt did NOT move → developSpotlightInsights
+  // was NOT re-invoked (a second real search would re-stamp it to a later time).
+  // Guarded on searchedAtBefore being present, mirroring the m3-5 decouple test:
+  // when the pipeline yielded no stamp there's nothing to compare, but the
+  // deduped:true flag above already proves the guard took the no-search path.
+  if (searchedAtBefore != null) {
+    const showB = await sseSnapshot('/api/show-events');
+    assert.equal(showB.spotlight && showB.spotlight.insights && showB.spotlight.insights.searchedAt,
+      searchedAtBefore,
+      'insights.searchedAt is unchanged — the legacy route did NOT run a second search');
+  }
+
+  await post('/api/share/stop', { token: A.token });
+});
+
+// ---------------------------------------------------------------------------
 // M3-6. PURE shaping helpers: shapeFacilitation cursor-cycles over the retrieved
 //       set WITHOUT re-fetching, assigns STABLE sids, derives evidenceIds, and
 //       carries authoredBy verbatim. assignSids dedupes by url + caps + stamps.
