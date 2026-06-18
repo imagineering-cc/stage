@@ -277,12 +277,18 @@ function withFakeEnv(claudeScript, { slow = false } = {}) {
     timeout: process.env.STAGE_READER_TIMEOUT_MS,
     grace: process.env.STAGE_READER_KILL_GRACE_MS,
     apiKey: process.env.ANTHROPIC_API_KEY,
+    unsafeDirect: process.env.STAGE_READER_UNSAFE_DIRECT,
   };
   delete process.env.ANTHROPIC_API_KEY;
   process.env.PATH = binDir + ':' + process.env.PATH; // our fake git wins
   process.env.STAGE_READER_CLAUDE_BIN = claudePath;
   process.env.STAGE_READER_TOKEN_FILE = tokenFile;
   process.env.STAGE_READER_SCRATCH = scratch;
+  // The OS sandbox is ON BY DEFAULT (fail-safe, FIX F). These fake-binary tests
+  // exercise the DIRECT spawn path, so opt OUT explicitly — the same way CI does
+  // (no sandbox installed). Sandbox-path tests below delete this var to re-enable
+  // the cage and point at a fake sudo/wrapper.
+  process.env.STAGE_READER_UNSAFE_DIRECT = '1';
   if (slow) {
     process.env.STAGE_READER_TIMEOUT_MS = '400';
     process.env.STAGE_READER_KILL_GRACE_MS = '200';
@@ -300,6 +306,7 @@ function withFakeEnv(claudeScript, { slow = false } = {}) {
         ['STAGE_READER_TIMEOUT_MS', saved.timeout],
         ['STAGE_READER_KILL_GRACE_MS', saved.grace],
         ['ANTHROPIC_API_KEY', saved.apiKey],
+        ['STAGE_READER_UNSAFE_DIRECT', saved.unsafeDirect],
       ]) {
         if (v === undefined) delete process.env[k]; else process.env[k] = v;
       }
@@ -423,84 +430,105 @@ test('runReader: concurrency 1 — a second concurrent call declines with {findi
   }
 });
 
-// ── Slice 8: the OS-sandbox spawn-path selection (STAGE_READER_SANDBOX) ───────
-// buildSpawn is the pure selector between DIRECT (spawn claude as-is) and
-// SANDBOX (spawn `sudo <wrapper> <cloneDir> -- claude ...`). We pin the argv
-// shape + env minimalism in both modes WITHOUT a live spawn.
+// ── Slice 8: the OS-sandbox spawn-path selection (fail-safe polarity) ─────────
+// buildSpawn is the pure selector between SANDBOX (default) and DIRECT
+// (STAGE_READER_UNSAFE_DIRECT=1). In sandbox mode the command is PINNED in the
+// wrapper, so reader.js passes ONLY `sudo -n <wrapper> <cloneDir>` and pipes the
+// prompt via stdin (FIX B). The gate is FAIL-SAFE (FIX F): default → cage.
 
-test('buildSpawn: DIRECT mode (flag unset) spawns claude with cwd + childEnv', () => {
-  const saved = process.env.STAGE_READER_SANDBOX;
-  delete process.env.STAGE_READER_SANDBOX;
-  process.env.STAGE_READER_CLAUDE_BIN = '/opt/claude';
+// Helper: run buildSpawn under a clean env, restoring afterward.
+function withSpawnEnv(env, fn) {
+  const keys = ['STAGE_READER_UNSAFE_DIRECT', 'STAGE_READER_WRAPPER', 'STAGE_READER_SUDO_BIN', 'STAGE_READER_CLAUDE_BIN', 'ANTHROPIC_API_KEY'];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  for (const k of keys) delete process.env[k];
+  for (const [k, v] of Object.entries(env)) process.env[k] = v;
   try {
+    return fn();
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
+  }
+}
+
+test('buildSpawn: FAIL-SAFE — default (no env) selects the SANDBOX cage, not direct', () => {
+  withSpawnEnv({ STAGE_READER_WRAPPER: '/usr/local/sbin/stage-reader-run' }, () => {
+    const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', { HOME: '/h' });
+    // Default = sandbox: the command is sudo, NOT claude. A forgotten flag must
+    // fail SAFE (run the cage), never silently spawn claude unconfined.
+    assert.equal(s.command, 'sudo', 'default must be the cage');
+    assert.equal(s.unit, 'stage-reader-clone');
+  });
+});
+
+test('buildSpawn: DIRECT mode (STAGE_READER_UNSAFE_DIRECT=1) spawns claude with cwd + childEnv', () => {
+  withSpawnEnv({ STAGE_READER_UNSAFE_DIRECT: '1', STAGE_READER_CLAUDE_BIN: '/opt/claude' }, () => {
     const childEnv = { HOME: '/h', PATH: '/bin' };
     const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', childEnv);
     assert.equal(s.command, '/opt/claude');
     assert.equal(s.unit, null);
+    assert.equal(s.stdinPrompt, null, 'direct mode passes prompt as argv, not stdin');
     assert.equal(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/clone');
     assert.deepEqual(s.spawnOpts.env, childEnv);
-    // The read-only tool restrictions are present.
     assert.ok(s.args.includes('--allowedTools'));
     assert.ok(s.args.includes('--disallowedTools'));
     assert.ok(!s.args.includes('--bare'), 'never --bare (would prefer the API key)');
-  } finally {
-    delete process.env.STAGE_READER_CLAUDE_BIN;
-    if (saved === undefined) delete process.env.STAGE_READER_SANDBOX;
-    else process.env.STAGE_READER_SANDBOX = saved;
-  }
+  });
 });
 
-test('buildSpawn: SANDBOX mode routes through `sudo -n <wrapper> <cloneDir> -- claude ...`', () => {
-  const savedFlag = process.env.STAGE_READER_SANDBOX;
-  const savedWrap = process.env.STAGE_READER_WRAPPER;
-  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
-  const savedBin = process.env.STAGE_READER_CLAUDE_BIN;
-  const savedKey = process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_API_KEY;
-  process.env.STAGE_READER_SANDBOX = '1';
-  process.env.STAGE_READER_WRAPPER = '/usr/local/sbin/stage-reader-run';
-  process.env.STAGE_READER_SUDO_BIN = 'sudo';
-  process.env.STAGE_READER_CLAUDE_BIN = 'claude';
-  try {
+test('buildSpawn: SANDBOX mode passes ONLY `sudo -n <wrapper> <cloneDir>` — NO claude argv (FIX B)', () => {
+  withSpawnEnv({ STAGE_READER_WRAPPER: '/usr/local/sbin/stage-reader-run', STAGE_READER_SUDO_BIN: 'sudo', STAGE_READER_CLAUDE_BIN: 'claude' }, () => {
     const cloneDir = '/var/lib/stage-reader/clones/run42/clone';
     const s = reader.buildSpawn(cloneDir, { HOME: '/nick/scratch', CLAUDE_CODE_OAUTH_TOKEN: 'nick-secret' });
     assert.equal(s.command, 'sudo');
-    // sudo -n (non-interactive), then the wrapper, the clone dir, the -- sep,
-    // then the claude argv.
-    assert.equal(s.args[0], '-n');
-    assert.equal(s.args[1], '/usr/local/sbin/stage-reader-run');
-    assert.equal(s.args[2], cloneDir);
-    assert.equal(s.args[3], '--');
-    assert.equal(s.args[4], 'claude');
-    assert.ok(s.args.includes('--allowedTools'), 'claude tool restrictions still passed verbatim');
+    // EXACTLY three args: -n, the wrapper, the clone dir. NOTHING after it — the
+    // command + read-only flags are pinned INSIDE the wrapper. No `--`, no claude
+    // binary, no tool flags. A caller cannot smuggle a command or a flag.
+    assert.deepEqual(s.args, ['-n', '/usr/local/sbin/stage-reader-run', cloneDir]);
+    assert.equal(s.args.length, 3, 'no caller-controlled argv after the clone dir');
+    assert.ok(!s.args.includes('--'), 'no -- separator (no claude argv at all)');
+    assert.ok(!s.args.includes('claude'), 'claude binary is pinned in the wrapper, not passed');
+    assert.ok(!s.args.includes('--allowedTools'), 'tool flags pinned in the wrapper, not passed');
     // The transient unit name is deterministic off the clone basename.
     assert.equal(s.unit, 'stage-reader-clone');
-    // Critically: nick's childEnv / OAuth token is NOT handed to sudo. Only a
-    // minimal PATH rides along, and NEVER an API key.
+    // The trusted prompt rides STDIN, not argv.
+    assert.equal(s.stdinPrompt, reader.HUNT_PROMPT, 'prompt piped via stdin');
+    assert.equal(s.spawnOpts.stdio[0], 'pipe', 'stdin is a pipe for the prompt');
+    // nick's childEnv / OAuth token is NOT handed to sudo. Only a minimal PATH.
     assert.deepEqual(Object.keys(s.spawnOpts.env), ['PATH']);
     assert.equal('CLAUDE_CODE_OAUTH_TOKEN' in s.spawnOpts.env, false, 'no token through sudo');
     assert.equal('ANTHROPIC_API_KEY' in s.spawnOpts.env, false);
-    assert.equal(s.spawnOpts.cwd, undefined, 'cwd set inside the cage by the wrapper, not by sudo');
-  } finally {
+    assert.equal(s.spawnOpts.cwd, undefined, 'cwd set inside the cage by the wrapper');
+  });
+});
+
+// For the runReader sandbox e2e tests we re-enable the cage (delete the opt-out
+// that withFakeEnv sets) and point STAGE_READER_SUDO_BIN at a fake sudo. The fake
+// sudo stands in for the whole sudo→wrapper→systemd-run→claude chain: it asserts
+// the pinned-argv shape, reads the prompt from STDIN, and emits the envelope.
+function enterSandboxMode(fake, fakeSudoBody) {
+  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
+  fs.writeFileSync(fakeSudo, fakeSudoBody, { mode: 0o755 });
+  const saved = {
+    unsafe: process.env.STAGE_READER_UNSAFE_DIRECT,
+    wrap: process.env.STAGE_READER_WRAPPER,
+    sudo: process.env.STAGE_READER_SUDO_BIN,
+  };
+  delete process.env.STAGE_READER_UNSAFE_DIRECT; // re-enable the cage (default)
+  process.env.STAGE_READER_WRAPPER = '/usr/local/sbin/stage-reader-run';
+  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
+  return () => {
     for (const [k, v] of [
-      ['STAGE_READER_SANDBOX', savedFlag],
-      ['STAGE_READER_WRAPPER', savedWrap],
-      ['STAGE_READER_SUDO_BIN', savedSudo],
-      ['STAGE_READER_CLAUDE_BIN', savedBin],
-      ['ANTHROPIC_API_KEY', savedKey],
+      ['STAGE_READER_UNSAFE_DIRECT', saved.unsafe],
+      ['STAGE_READER_WRAPPER', saved.wrap],
+      ['STAGE_READER_SUDO_BIN', saved.sudo],
     ]) {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
-  }
-});
+  };
+}
 
-test('runReader: SANDBOX mode invokes the wrapper via a FAKE sudo and parses its finding', async () => {
-  // End-to-end through runReader with STAGE_READER_SANDBOX=1, a FAKE `sudo` that
-  // stands in for the whole sudo→wrapper→systemd-run→claude chain: it just
-  // verifies it was called as `sudo -n <wrapper> <cloneDir> -- claude ...` and
-  // emits the claude JSON envelope. This proves the production code path SELECTS
-  // and SHAPES the sandboxed invocation correctly (the real OS confinement is an
-  // on-Pi gate, per ops/reader-sandbox.md — CI cannot sudo).
+test('runReader: SANDBOX mode invokes the wrapper via a FAKE sudo (pinned shape + stdin prompt) and parses its finding', async () => {
   const result = {
     finding: 'sandboxed read still produces a finding',
     evidence: [{ path: 'server.js', why: 'real file in the fixture' }],
@@ -509,40 +537,27 @@ test('runReader: SANDBOX mode invokes the wrapper via a FAKE sudo and parses its
     kind: 'eerie-read',
   };
   const envelope = JSON.stringify({ result: JSON.stringify(result) });
-  // No token file needed in sandbox mode — runReader skips the nick-side token.
   const fake = withFakeEnv('#!/bin/sh\necho "fake claude should not be called directly in sandbox mode" >&2\nexit 99\n');
-  // Fake sudo: assert the argv shape, then emit the envelope as if claude ran.
-  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
-  fs.writeFileSync(
-    fakeSudo,
+  // Fake sudo: assert `sudo -n <wrapper> <cloneDir>` with NO 4th arg, assert a
+  // non-empty prompt arrives on STDIN, then emit the envelope.
+  const exitSandbox = enterSandboxMode(
+    fake,
     '#!/bin/sh\n' +
-    '# expected: sudo -n <wrapper> <cloneDir> -- claude ...\n' +
     '[ "$1" = "-n" ] || { echo "missing -n" >&2; exit 2; }\n' +
     'case "$2" in */stage-reader-run) : ;; *) echo "bad wrapper: $2" >&2; exit 2 ;; esac\n' +
     'case "$3" in */clone) : ;; *) echo "bad clonedir: $3" >&2; exit 2 ;; esac\n' +
-    '[ "$4" = "--" ] || { echo "missing --" >&2; exit 2; }\n' +
+    '[ -z "$4" ] || { echo "unexpected 4th arg: $4" >&2; exit 2 ;}\n' +
+    'prompt="$(cat)"\n' +                       // read the piped prompt from stdin
+    '[ -n "$prompt" ] || { echo "empty stdin prompt" >&2; exit 2; }\n' +
     'cat <<\'EOF\'\n' + envelope + '\nEOF\n',
-    { mode: 0o755 },
   );
-  const savedFlag = process.env.STAGE_READER_SANDBOX;
-  const savedWrap = process.env.STAGE_READER_WRAPPER;
-  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
-  process.env.STAGE_READER_SANDBOX = '1';
-  process.env.STAGE_READER_WRAPPER = '/usr/local/sbin/stage-reader-run';
-  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
   try {
     const out = await reader.runReader({ handle: 'simonw', repo: 'datasette', spotlightId: 'sb1' });
     assert.equal(out.kind, 'eerie-read', 'sandbox path produced the finding');
     assert.equal(out.finding, result.finding);
     assert.equal(leftoverRunDirs(fake.scratch), 0, 'scratch wiped on the sandbox path too');
   } finally {
-    for (const [k, v] of [
-      ['STAGE_READER_SANDBOX', savedFlag],
-      ['STAGE_READER_WRAPPER', savedWrap],
-      ['STAGE_READER_SUDO_BIN', savedSudo],
-    ]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
+    exitSandbox();
     fake.restore();
   }
 });
@@ -551,12 +566,7 @@ test('runReader: SANDBOX mode does NOT require nick-side OAuth token (stage-read
   const result = { finding: 'x', evidence: [{ path: 'server.js', why: 'y' }], confidence: 'high', kind: 'eerie-read' };
   const envelope = JSON.stringify({ result: JSON.stringify(result) });
   const fake = withFakeEnv('#!/bin/sh\nexit 99\n');
-  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
-  fs.writeFileSync(fakeSudo, '#!/bin/sh\ncat <<\'EOF\'\n' + envelope + '\nEOF\n', { mode: 0o755 });
-  const savedFlag = process.env.STAGE_READER_SANDBOX;
-  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
-  process.env.STAGE_READER_SANDBOX = '1';
-  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
+  const exitSandbox = enterSandboxMode(fake, '#!/bin/sh\ncat >/dev/null\ncat <<\'EOF\'\n' + envelope + '\nEOF\n');
   // Point the token file at a NON-EXISTENT path: in direct mode this aborts, but
   // sandbox mode must not require it.
   process.env.STAGE_READER_TOKEN_FILE = path.join(fake.sandbox, 'no-such-token.env');
@@ -564,24 +574,14 @@ test('runReader: SANDBOX mode does NOT require nick-side OAuth token (stage-read
     const out = await reader.runReader({ handle: 'simonw', repo: 'datasette', spotlightId: 'sb2' });
     assert.equal(out.kind, 'eerie-read', 'sandbox run succeeds without nick-side token');
   } finally {
-    for (const [k, v] of [
-      ['STAGE_READER_SANDBOX', savedFlag],
-      ['STAGE_READER_SUDO_BIN', savedSudo],
-    ]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
+    exitSandbox();
     fake.restore();
   }
 });
 
 test('runReader: SANDBOX mode STILL hard-aborts on ANTHROPIC_API_KEY (cost safety survives)', async () => {
   const fake = withFakeEnv('#!/bin/sh\nexit 99\n');
-  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
-  fs.writeFileSync(fakeSudo, '#!/bin/sh\necho "{}"\n', { mode: 0o755 });
-  const savedFlag = process.env.STAGE_READER_SANDBOX;
-  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
-  process.env.STAGE_READER_SANDBOX = '1';
-  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
+  const exitSandbox = enterSandboxMode(fake, '#!/bin/sh\ncat >/dev/null\necho "{}"\n');
   process.env.ANTHROPIC_API_KEY = 'sk-ant-leak';
   try {
     await assert.rejects(
@@ -592,12 +592,62 @@ test('runReader: SANDBOX mode STILL hard-aborts on ANTHROPIC_API_KEY (cost safet
     assert.equal(leftoverRunDirs(fake.scratch), 0, 'wiped even on the sandbox cost-abort');
   } finally {
     delete process.env.ANTHROPIC_API_KEY;
-    for (const [k, v] of [
-      ['STAGE_READER_SANDBOX', savedFlag],
-      ['STAGE_READER_SUDO_BIN', savedSudo],
-    ]) {
-      if (v === undefined) delete process.env[k]; else process.env[k] = v;
-    }
+    exitSandbox();
     fake.restore();
   }
+});
+
+// ── Slice 8: the WRAPPER's own argument validation (FIX B + D), as a shell test ─
+// The wrapper is the trust boundary. We can't run its systemd-run exec without
+// root, but we CAN drive its validation logic up to the exec by stubbing
+// systemd-run + the prerequisite probes on PATH and feeding it hostile args. The
+// wrapper must: accept EXACTLY one clone-dir arg (reject any extra → reject a
+// non-claude command, FIX B), and reject a clone dir outside /clones (FIX D).
+
+const WRAPPER_PATH = path.join(__dirname, '..', 'ops', 'stage-reader-run');
+
+// Run the wrapper against a fake SCRATCH layout. We can't override the wrapper's
+// hardcoded /var/lib/stage-reader paths without root, so this test only exercises
+// the EARLY validation (arg shape) which fires BEFORE the path/prereq checks.
+function runWrapper(args) {
+  const cp = require('node:child_process');
+  const r = cp.spawnSync('/bin/bash', [WRAPPER_PATH, ...args], { encoding: 'utf8', input: 'prompt\n' });
+  return { code: r.status, stderr: r.stderr || '' };
+}
+
+test('wrapper: rejects MORE than one argument — no caller command/flags accepted (FIX B)', () => {
+  // The old hole was `stage-reader-run <clone> -- /bin/sh -c ...`. The new wrapper
+  // takes EXACTLY one arg; anything after the clone dir is a usage error, so a
+  // non-claude command can never be smuggled in.
+  const r = runWrapper(['/var/lib/stage-reader/clones/x', '--', '/bin/sh', '-c', 'id']);
+  assert.notEqual(r.code, 0, 'extra args rejected');
+  assert.match(r.stderr, /exactly one|usage|NO other args/i);
+});
+
+test('wrapper: rejects zero arguments', () => {
+  const r = runWrapper([]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /usage|exactly one/i);
+});
+
+test('wrapper: rejects a relative (non-absolute) clone dir', () => {
+  const r = runWrapper(['relative/path']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /absolute/i);
+});
+
+test('wrapper: rejects a clone dir OUTSIDE /var/lib/stage-reader/clones (FIX D + traversal)', () => {
+  // A real, existing, absolute dir that is NOT under the clones root. The wrapper
+  // realpath-validates containment; a path outside clones/ must NOT proceed to
+  // exec. NOTE: the wrapper uses GNU `realpath -e` (correct on the Pi / Bookworm
+  // coreutils). On macOS (BSD realpath, no -e flag) the wrapper still REJECTS —
+  // it just dies one line earlier with a "does not resolve" message. The
+  // security-relevant invariant verified here is "non-zero exit, no exec"; the
+  // exact GNU containment message is verified on the Pi (ops/reader-sandbox.md).
+  const r = runWrapper(['/tmp']);
+  assert.notEqual(r.code, 0, 'a path outside clones/ must be rejected (no exec)');
+  assert.match(
+    r.stderr,
+    /escapes clones root|clones dir missing|not a directory|does not resolve|run install-reader-sandbox/i,
+  );
 });

@@ -59,7 +59,13 @@ jobs:
         # timeout->SIGKILL via a FAKE claude binary, temp-dir wipe, concurrency).
         # CI CANNOT run real `claude`; the live-model gate is an on-Pi observation
         # run by hand (see the PR description). Zero-dep node:test.
-        run: node --test test/reader.test.js
+        #
+        # STAGE_READER_UNSAFE_DIRECT=1: the OS sandbox is ON BY DEFAULT (fail-safe),
+        # but CI has no sandbox installed (no stage-reader user / no sudoers rule),
+        # so it takes the explicit direct-spawn opt-out. The tests that exercise
+        # the sandbox PATH set their own env per-test; this default keeps the
+        # direct-mode tests off the (absent) sudo wrapper.
+        run: STAGE_READER_UNSAFE_DIRECT=1 node --test test/reader.test.js
 
   # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
   # validation passed — so untrusted PR code never reaches the Pi, and broken

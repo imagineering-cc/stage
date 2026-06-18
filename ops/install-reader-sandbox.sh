@@ -84,6 +84,14 @@ sudo install -d -o "${READER_USER}" -g "${READER_USER}" -m 0700 "${READER_RUNTMP
 
 # ── 3. the root-owned wrapper (NOT writable by nick) ──────────────────────────
 say "3. wrapper ${WRAPPER_DST}"
+# The wrapper hardcodes the claude binary path (/usr/local/bin/claude, falling
+# back to /home/nick/.local/bin/claude). Confirm one of them exists so the cage
+# can actually start claude — otherwise the on-Pi run would die at exec time.
+if [[ ! -x /usr/local/bin/claude && ! -x /home/nick/.local/bin/claude ]]; then
+  printf 'WARNING: no claude binary at /usr/local/bin/claude or /home/nick/.local/bin/claude.\n' >&2
+  printf '         The cage will fail to start claude until one exists. Install it or edit\n' >&2
+  printf '         CLAUDE_BIN in %s before relying on the sandbox.\n' "${WRAPPER_DST}" >&2
+fi
 sudo install -o root -g root -m 0755 "${WRAPPER_SRC}" "${WRAPPER_DST}"
 printf 'installed %s (root:root 0755 — nick cannot edit it)\n' "${WRAPPER_DST}"
 
@@ -93,22 +101,42 @@ printf 'installed %s (root:root 0755 — nick cannot edit it)\n' "${WRAPPER_DST}
 # `visudo -c`, and ONLY install if valid — a malformed sudoers file can lock out
 # sudo entirely, so we never install an unchecked one.
 say "4. sudoers drop-in ${SUDOERS_DST}"
+# FIX E (cage-match): VALIDATE BEFORE INSTALL. A malformed file in
+# /etc/sudoers.d/ can lock out sudo entirely, so we never let an unchecked file
+# reach that directory. Write a ROOT-OWNED temp file, `visudo -cf` it, and ONLY
+# `install` into /etc/sudoers.d/ if it parses. (The earlier order installed first,
+# then validated — leaving a window where a bad file was live.)
+#
+# The grant runs ONLY the pinned wrapper. The wrapper hardcodes the claude
+# command + read-only flags and accepts ONLY a clone dir (FIX B), so this grant
+# is genuinely "run THE reader operation", not "run anything as stage-reader".
+# The `*` covers the single clone-dir argument; the wrapper re-validates it.
 SUDOERS_TMP="$(mktemp)"
 trap 'rm -f "${SUDOERS_TMP}"' EXIT
 cat >"${SUDOERS_TMP}" <<EOF
 # Installed by ops/install-reader-sandbox.sh — The Reader OS sandbox (Slice 8).
 # nick may run ONLY the stage-reader wrapper as root, without a password, so the
 # stage-server (running as nick) can drop privilege to stage-reader for a read.
-# The wrapper validates its arguments; THAT is the trust boundary, not this glob.
+# The wrapper PINS the command (claude + fixed read-only flags) and accepts only
+# a clone dir, which it re-validates — THAT is the trust boundary, not this glob.
 ${RUN_USER} ALL=(root) NOPASSWD: ${WRAPPER_DST} *
 EOF
+# Lock the temp file down to root before validating/installing.
+sudo chown root:root "${SUDOERS_TMP}"
+sudo chmod 0440 "${SUDOERS_TMP}"
+if ! sudo visudo -cf "${SUDOERS_TMP}"; then
+  printf 'sudoers drop-in failed validation; NOT installing it (sudo stays intact)\n' >&2
+  exit 1
+fi
+# Validated — now atomically place it. Re-assert ownership/mode on the dest.
 sudo install -o root -g root -m 0440 "${SUDOERS_TMP}" "${SUDOERS_DST}"
-if ! sudo visudo -cf "${SUDOERS_DST}"; then
-  printf 'sudoers drop-in failed validation; REMOVING it to avoid locking sudo\n' >&2
+# Belt-and-braces: validate the WHOLE sudoers tree now the drop-in is in place.
+if ! sudo visudo -c >/dev/null; then
+  printf 'sudoers tree invalid after install; REMOVING the drop-in\n' >&2
   sudo rm -f "${SUDOERS_DST}"
   exit 1
 fi
-printf 'installed + visudo-validated %s\n' "${SUDOERS_DST}"
+printf 'installed + visudo-validated (pre and post) %s\n' "${SUDOERS_DST}"
 
 # ── 5. stage-reader's claude OAuth token ──────────────────────────────────────
 # stage-reader runs claude on the Max-plan OAuth path with its OWN config dir and
@@ -126,9 +154,10 @@ else
   sudo chmod 0600 "${READER_TOKEN_FILE}"
   cat <<EOF
 NOTE: minted an EMPTY token file at ${READER_TOKEN_FILE} (owner stage-reader, 0600).
-      Mint stage-reader's OWN token and write it there, e.g.:
+      Mint stage-reader's OWN token and write it there by running setup-token AS
+      stage-reader against its own config dir:
         sudo -u ${READER_USER} env HOME=${READER_HOME} CLAUDE_CONFIG_DIR=${READER_CONFIG} \\
-          ${WRAPPER_DST##*/}-setup   # OR run 'claude setup-token' as stage-reader
+          claude setup-token
       See ops/reader-sandbox.md for the exact token-mint recipe.
 EOF
 fi
@@ -148,8 +177,12 @@ EOF
 # ── 7. final summary ──────────────────────────────────────────────────────────
 say "done"
 cat <<EOF
-The Reader OS sandbox is installed. Before production untrusted-repo reads:
+The Reader OS sandbox is installed. The cage is ON BY DEFAULT (fail-safe) — the
+stage-server uses it automatically; do NOT set STAGE_READER_UNSAFE_DIRECT=1 in
+production (that env var is the CI/dev opt-OUT to the unconfined path).
+
+Before production untrusted-repo reads:
   1. Mint stage-reader's claude OAuth token (step 5 note above).
-  2. Set STAGE_READER_SANDBOX=1 in the stage-server systemd drop-in.
+  2. Restart the stage-server so the next read uses the cage.
   3. Run the on-Pi verification checklist in ops/reader-sandbox.md.
 EOF
