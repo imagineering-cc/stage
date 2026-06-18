@@ -324,6 +324,8 @@ stage/
 | POST   | `/api/event/open`   | Host opens a fresh event `{title}`; 409 if already open |
 | POST   | `/api/event/close`  | Host closes + archives the open event; 409 if none |
 | GET    | `/api/event/archive`| Host-only past events; `?id=` returns that event's reports/history/attendees |
+| GET    | `/api/event/recap`  | Host-only structured event recap (consent-traced); `?id=` selects an archived/live event, else the open event |
+| GET    | `/api/event/recap.html` | Host-only self-contained HTML recap export (same gating/`?id=` as `/api/event/recap`) |
 | POST   | `/api/mode`         | Host-only room phase selection                |
 | POST   | `/api/spotlight/start` | Host begins a consented intro/progress turn |
 | POST   | `/api/spotlight/transcript` | Admitted presenter streams speech text (per-token gated) |

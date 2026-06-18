@@ -55,6 +55,7 @@ const {
   getEvent,
   getEventsArchive,
 } = require('./event-session');
+const { buildRecap, renderRecapHtml } = require('./recap');
 
 // --- HTTP helpers ---
 function readBody(req) {
@@ -85,6 +86,21 @@ function requireOpenEvent(res) {
   if (isEventOpen()) return true;
   send(res, 403, { error: 'No event is running right now.', eventClosed: true });
   return false;
+}
+
+// Resolve the event record a recap should describe (M4). With an explicit `id`,
+// match an archived event first, then the live event if its id matches. With no
+// id, fall back to the current OPEN event (the host's "recap what just happened"
+// path). Returns the raw event record ({id,title,status,openedAt,closedAt}) or
+// null. The live event is read through getEvent() so a still-open event carries
+// its real openedAt/null closedAt; recap.buildRecap normalizes either shape.
+function resolveRecapEvent(id) {
+  const live = getEvent();
+  if (id) {
+    return getEventsArchive().find(e => e.id === id) ||
+      (live && live.id === id ? live : null);
+  }
+  return live || null;
 }
 
 // THE TRUST BOUNDARY (M2). The single source of truth for "who may speak" is
@@ -270,6 +286,27 @@ async function requestHandler(req, res) {
         .filter(identity => Array.isArray(identity.eventIds) && identity.eventIds.includes(id))
         .map(identity => participantProfile(identity)),
     });
+  }
+
+  // host: event recap (M4). A reviewable recap assembled from ALREADY-archived
+  // data (reports/history/attendees/event record) so closing an event leaves
+  // shareable material without manual note-taking. HOST-ONLY — kept off the
+  // public Caddy allow-list like /api/reports, /api/event/* (it surfaces
+  // consented participant material). `?id=` selects an archived OR the live
+  // event; no id falls back to the current open event. The consent-integrity
+  // gate (withdrawn recording consent / removed reports never leak) lives in
+  // recap.buildRecap; this route only resolves the event record and renders.
+  if (method === 'GET' && (p === '/api/event/recap' || p === '/api/event/recap.html')) {
+    const id = url.searchParams.get('id');
+    const eventRecord = resolveRecapEvent(id);
+    if (!eventRecord) return send(res, 404, { error: 'unknown event' });
+    const recap = buildRecap(eventRecord);
+    if (p === '/api/event/recap.html') {
+      const html = renderRecapHtml(recap);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    }
+    return send(res, 200, { recap });
   }
 
   // admin: mint a new attendee

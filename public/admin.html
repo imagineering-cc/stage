@@ -638,6 +638,10 @@
 	    <div class="event-close-form" id="event-close-form" hidden>
 	      <button class="danger-btn" id="event-close-btn" onclick="closeEvent()">Close event</button>
 	    </div>
+	    <div class="recap-row" id="event-recap-row">
+	        <button class="ghost-btn" id="event-recap-btn" onclick="openRecap()">View recap</button>
+	        <button class="ghost-btn" id="event-recap-export-btn" onclick="exportRecap()">Export recap (HTML)</button>
+	    </div>
 	    <div id="event-feedback" role="status"></div>
 	  </section>
 
@@ -904,6 +908,26 @@
       } finally {
         btn.disabled = false;
       }
+    }
+
+    // Recap (M4): open the host-only recap view / HTML export for the current
+    // event (open or, if none, the most recently archived) in a new tab. The
+    // routes default to the open event with no id; when no event is open we
+    // pass the latest archived event's id so the host can still review it.
+    async function recapEventId() {
+      const data = (await fetch(`${API}/api/event`).then(r => r.json()).catch(() => ({}))) || {};
+      if (data.event && data.event.id) return null; // open event -> route default (no id)
+      const latest = Array.isArray(data.archive) && data.archive[0] ? data.archive[0].id : null;
+      return latest; // may be null -> route 404s, handled by the caller's new tab
+    }
+    async function openRecap() {
+      const id = await recapEventId();
+      window.open(`${API}/api/event/recap.html${id ? `?id=${encodeURIComponent(id)}` : ''}`, '_blank', 'noopener');
+    }
+    async function exportRecap() {
+      // Same HTML artifact; the browser's "Save as" turns the opened tab into a
+      // shareable file. (A dedicated download is a follow-up if wanted.)
+      return openRecap();
     }
 
     // ── Render playback ───────────────────────────────────
