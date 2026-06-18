@@ -300,7 +300,10 @@ the presenter has confirmed their transcript.
 
 ### Host / admin actions (private — local/Tailscale only, never public-proxied)
 
-`/admin` UI, `/api/event/open`·`/close`·`/archive`, `/api/mint`, `/api/mode`,
+`/admin` UI, `/api/event/open`·`/close`·`/archive`·`/recap`·`/recap.html` (the
+M4 event recap + self-contained HTML export — host-only, off the public proxy
+like every other event control, since they surface consented participant
+material), `/api/mint`, `/api/mode`,
 `/api/skip`, `/api/timer/start`·`/clear`, `/api/announce`·`/announce/clear`,
 `/api/sprint/start`·`/pause`·`/resume`·`/skip`·`/extend`·`/stop` and
 `GET /api/sprint`, `/api/spotlight/start`·`/insights`·`/end`,

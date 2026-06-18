@@ -700,6 +700,15 @@ function archiveSpotlight() {
   reports.unshift({
     id: room.spotlight.id,
     eventId: room.spotlight.eventId || state.hooks.currentEventId(),
+    // The presenter's private token, stamped at archive time so the recap (M4)
+    // can re-resolve the LIVE identity and honour CURRENT consent — if the
+    // participant later withdraws recording consent, the recap must drop this
+    // report. participantName alone is a display label (mutable, non-unique), so
+    // it cannot anchor a consent re-check. The reports[] entry is gated only by
+    // 'is an object' (validateStateShape), so this is additive — no new predicate.
+    // Reports archived before this field exists carry no token; the recap treats a
+    // missing token as "cannot confirm consent" and fails CLOSED (drops the body).
+    participantToken: room.spotlight.participantToken || null,
     participantName: room.spotlight.participantName,
     projectTitle: room.spotlight.projectTitle,
     kind: room.spotlight.kind,

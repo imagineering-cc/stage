@@ -1902,3 +1902,154 @@ test('m3: a dismiss during research is durable (not overwritten by the completin
 
   await post('/api/share/stop', { token: A.token });
 });
+
+// ---------------------------------------------------------------------------
+// M4-1 (event recap): closing an event leaves a reviewable recap assembled
+// from already-archived data. A spotlight report, the participant profile, and
+// the event record all surface in GET /api/event/recap and the HTML export.
+// ---------------------------------------------------------------------------
+test('m4: recap assembles participant, report, and event fields from archived data', async () => {
+  const opened = await openEvent('M4 Recap Build');
+  const eventId = opened.body.event.id;
+  const guest = (await join()).body;
+  await setConsent(guest.token, { recording: true, research: false, title: 'Recap Widget' });
+
+  // Drive a full spotlight so a report is archived for this event.
+  await post('/api/spotlight/start', { token: guest.token, kind: 'introduction' });
+  await post('/api/spotlight/transcript', {
+    token: guest.token, transcript: 'We shipped the recap widget today.', isFinal: true,
+  });
+  const ended = await post('/api/spotlight/end', { token: guest.token });
+  assert.equal(ended.status, 200, 'spotlight ended and report archived');
+
+  // No-id recap targets the current OPEN event.
+  const recapRes = await get('/api/event/recap');
+  assert.equal(recapRes.status, 200, 'recap route returns 200');
+  const recap = recapRes.body.recap;
+  assert.equal(recap.event.id, eventId, 'recap is for the open event');
+  assert.equal(recap.event.title, 'M4 Recap Build', 'recap carries the event title');
+
+  // Participant profile surfaces.
+  assert.ok(recap.participants.some(pp => pp.projectTitle === 'Recap Widget'),
+    'recap lists the participant and their project');
+
+  // The archived report surfaces with its consented body.
+  assert.equal(recap.reports.length, 1, 'recap surfaces the one archived report');
+  const r = recap.reports[0];
+  assert.equal(r.redacted, false, 'report is not redacted while consent stands');
+  assert.equal(r.transcript, 'We shipped the recap widget today.', 'report carries the transcript');
+  assert.equal(recap.summary.consentedReportCount, 1, 'summary counts the consented report');
+
+  // The ?id= form resolves the same event explicitly.
+  const byId = await get(`/api/event/recap?id=${eventId}`);
+  assert.equal(byId.status, 200, 'recap by explicit id returns 200');
+  assert.equal(byId.body.recap.event.id, eventId, 'recap by id matches');
+
+  // An unknown id is a clean 404, not a crash.
+  const missing = await get('/api/event/recap?id=deadbeefdead');
+  assert.equal(missing.status, 404, 'unknown event id returns 404');
+
+  // The HTML export is self-contained text/html and contains the headline.
+  const html = await fetch(BASE + '/api/event/recap.html');
+  assert.equal(html.status, 200, 'recap.html returns 200');
+  assert.match(html.headers.get('content-type') || '', /text\/html/, 'recap.html is text/html');
+  const htmlText = await html.text();
+  assert.match(htmlText, /M4 Recap Build/, 'HTML export contains the event title');
+  assert.match(htmlText, /We shipped the recap widget today\./, 'HTML export contains the consented transcript');
+  // House style: no em-dashes in the human-facing export.
+  assert.ok(!htmlText.includes('—'), 'HTML export contains no em-dash');
+});
+
+// ---------------------------------------------------------------------------
+// M4-2 (CONSENT-INTEGRITY INVARIANT — the trust boundary): a report whose
+// participant has WITHDRAWN recording consent must NOT appear in the recap or
+// export. The recap re-reads LIVE consent, so a withdrawal AFTER archival wins:
+// the report is redacted (no transcript, no links) in JSON, and the spoken
+// words are absent from the HTML export. Removed reports are covered by the
+// same gate (a deleted report is simply not in reports[] and never surfaces).
+// ---------------------------------------------------------------------------
+test('m4: a withdrawn-consent report does NOT leak into the recap or export', async () => {
+  await openEvent('M4 Consent Withdrawal');
+  const guest = (await join()).body;
+  await setConsent(guest.token, { recording: true, research: false, title: 'Secret Project' });
+
+  // Archive a report while consent stands.
+  await post('/api/spotlight/start', { token: guest.token, kind: 'introduction' });
+  const secret = 'This spoken material must vanish once consent is withdrawn.';
+  await post('/api/spotlight/transcript', { token: guest.token, transcript: secret, isFinal: true });
+  await post('/api/spotlight/end', { token: guest.token });
+
+  // Sanity: it IS present while consent stands.
+  let recap = (await get('/api/event/recap')).body.recap;
+  assert.equal(recap.reports[0].redacted, false, 'present before withdrawal');
+  assert.equal(recap.reports[0].transcript, secret, 'transcript present before withdrawal');
+
+  // WITHDRAW recording consent (re-POST profile with consentRecording:false).
+  const withdraw = await setConsent(guest.token, { recording: false, research: false, title: 'Secret Project' });
+  assert.equal(withdraw.status, 200, 'consent withdrawal accepted');
+
+  // JSON recap: the report is now redacted, with NO transcript / links keys.
+  recap = (await get('/api/event/recap')).body.recap;
+  const r = recap.reports[0];
+  assert.equal(r.redacted, true, 'report is redacted after consent withdrawal');
+  assert.equal(r.consentWithdrawn, true, 'recap flags consent as withdrawn');
+  assert.ok(!('transcript' in r), 'redacted report carries NO transcript key');
+  assert.ok(!('links' in r), 'redacted report carries NO links key');
+  assert.equal(recap.summary.consentedReportCount, 0, 'no consented reports remain');
+  assert.equal(recap.summary.redactedReportCount, 1, 'the withdrawn report is counted as redacted');
+
+  // The spoken words must not appear ANYWHERE in the JSON payload.
+  const recapRaw = JSON.stringify(recap);
+  assert.ok(!recapRaw.includes(secret), 'withdrawn transcript absent from the entire recap JSON');
+
+  // HTML export: the spoken words must be absent.
+  const html = await (await fetch(BASE + '/api/event/recap.html')).text();
+  assert.ok(!html.includes(secret), 'withdrawn transcript absent from the HTML export');
+  assert.match(html, /made private/i, 'export shows a privacy tombstone instead of the content');
+});
+
+// ---------------------------------------------------------------------------
+// M4-3 (THE HEADLINE MILESTONE PATH): "closing an event creates a reviewable
+// recap." The other M4 tests recap the OPEN event (no-id -> live branch); this
+// exercises the resolveRecapEvent(id) ARCHIVED branch — recap a CLOSED event by
+// its id, proving reports[] survive the close and the archived-id lookup works.
+// ---------------------------------------------------------------------------
+test('m4: closing an event leaves a reviewable recap retrievable by archived id', async () => {
+  const opened = await openEvent('M4 Closed Recap');
+  const eventId = opened.body.event.id;
+  const guest = (await join()).body;
+  await setConsent(guest.token, { recording: true, research: false, title: 'Closed Widget' });
+
+  // Drive a full consented spotlight so a report archives for this event.
+  await post('/api/spotlight/start', { token: guest.token, kind: 'introduction' });
+  const transcript = 'We presented the closed-event widget before the event ended.';
+  await post('/api/spotlight/transcript', { token: guest.token, transcript, isFinal: true });
+  await post('/api/spotlight/end', { token: guest.token });
+
+  // CLOSE the event — the milestone trigger ("closing creates a recap").
+  const closed = await post('/api/event/close');
+  assert.equal(closed.status, 200, 'event closes');
+  assert.equal(closed.body.event.status, 'closed', 'event is now closed');
+
+  // The room is now closed; recap MUST be retrievable by the archived event id
+  // (the resolveRecapEvent archived branch, previously untested).
+  const recapRes = await get(`/api/event/recap?id=${eventId}`);
+  assert.equal(recapRes.status, 200, 'recap of a closed event returns 200 by archived id');
+  const recap = recapRes.body.recap;
+  assert.equal(recap.event.id, eventId, 'recap is for the closed event');
+  assert.equal(recap.event.status, 'closed', 'recap reflects the closed status');
+
+  // reports[] survive the close: the consented report still surfaces in full.
+  assert.equal(recap.reports.length, 1, 'the archived report survives the event close');
+  const r = recap.reports[0];
+  assert.equal(r.redacted, false, 'report is not redacted (consent still stands)');
+  assert.equal(r.transcript, transcript, 'archived report still carries its transcript');
+  assert.equal(recap.summary.consentedReportCount, 1, 'summary counts the surviving report');
+
+  // The HTML export for the archived id is self-contained text/html with the title.
+  const htmlRes = await fetch(BASE + `/api/event/recap.html?id=${eventId}`);
+  assert.equal(htmlRes.status, 200, 'recap.html for a closed event returns 200');
+  assert.match(htmlRes.headers.get('content-type') || '', /text\/html/, 'recap.html is text/html');
+  const htmlText = await htmlRes.text();
+  assert.match(htmlText, /M4 Closed Recap/, 'HTML export of the closed event contains the title');
+});
