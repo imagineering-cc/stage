@@ -447,7 +447,15 @@ function claudeArgsDirect() {
 //   can target it directly.
 function buildSpawn(cloneDir, childEnv) {
   if (sandboxEnabled()) {
-    const unit = `stage-reader-${path.basename(cloneDir)}`;
+    // UNIQUE-PER-RUN unit name (cage-match round-2 MED). cloneDir is always
+    // `<runDir>/clone`, so basename(cloneDir) === "clone" for EVERY run — a
+    // collision that would let the reaper target the wrong unit. Derive from the
+    // RUN dir (the parent), which carries the per-run `<spotlightId|rand>-<hex>`
+    // token. MUST match the wrapper's derivation exactly: it computes
+    // `basename(dirname(REAL_CLONE))`. The wrapper sanitises to the systemd unit
+    // charset; reader.js only ever produces safe tokens (safeSegment / hex), so
+    // the two agree on every real input.
+    const unit = `stage-reader-${path.basename(path.dirname(cloneDir))}`;
     return {
       command: sudoBin(),
       // `sudo -n` (non-interactive): the NOPASSWD sudoers rule must apply, else

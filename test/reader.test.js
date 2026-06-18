@@ -457,7 +457,8 @@ test('buildSpawn: FAIL-SAFE — default (no env) selects the SANDBOX cage, not d
     // Default = sandbox: the command is sudo, NOT claude. A forgotten flag must
     // fail SAFE (run the cage), never silently spawn claude unconfined.
     assert.equal(s.command, 'sudo', 'default must be the cage');
-    assert.equal(s.unit, 'stage-reader-clone');
+    // UNIQUE per run: derived from the RUN dir (parent of clone), not "clone".
+    assert.equal(s.unit, 'stage-reader-run1');
   });
 });
 
@@ -489,8 +490,9 @@ test('buildSpawn: SANDBOX mode passes ONLY `sudo -n <wrapper> <cloneDir>` — NO
     assert.ok(!s.args.includes('--'), 'no -- separator (no claude argv at all)');
     assert.ok(!s.args.includes('claude'), 'claude binary is pinned in the wrapper, not passed');
     assert.ok(!s.args.includes('--allowedTools'), 'tool flags pinned in the wrapper, not passed');
-    // The transient unit name is deterministic off the clone basename.
-    assert.equal(s.unit, 'stage-reader-clone');
+    // The transient unit name is UNIQUE per run — derived from the run dir
+    // (parent of clone: `run42`), NOT the always-"clone" basename (round-2 MED).
+    assert.equal(s.unit, 'stage-reader-run42');
     // The trusted prompt rides STDIN, not argv.
     assert.equal(s.stdinPrompt, reader.HUNT_PROMPT, 'prompt piped via stdin');
     assert.equal(s.spawnOpts.stdio[0], 'pipe', 'stdin is a pipe for the prompt');
@@ -499,6 +501,29 @@ test('buildSpawn: SANDBOX mode passes ONLY `sudo -n <wrapper> <cloneDir>` — NO
     assert.equal('CLAUDE_CODE_OAUTH_TOKEN' in s.spawnOpts.env, false, 'no token through sudo');
     assert.equal('ANTHROPIC_API_KEY' in s.spawnOpts.env, false);
     assert.equal(s.spawnOpts.cwd, undefined, 'cwd set inside the cage by the wrapper');
+  });
+});
+
+test('buildSpawn: unit name is UNIQUE per run AND agrees with the wrapper derivation (round-2 MED)', () => {
+  withSpawnEnv({ STAGE_READER_WRAPPER: '/usr/local/sbin/stage-reader-run' }, () => {
+    // Two different runs (different run-dir tokens) → two different units.
+    const a = reader.buildSpawn('/var/lib/stage-reader/clones/sp1-aaaa1111/clone', { HOME: '/h' });
+    const b = reader.buildSpawn('/var/lib/stage-reader/clones/sp1-bbbb2222/clone', { HOME: '/h' });
+    assert.equal(a.unit, 'stage-reader-sp1-aaaa1111');
+    assert.equal(b.unit, 'stage-reader-sp1-bbbb2222');
+    assert.notEqual(a.unit, b.unit, 'distinct runs get distinct units');
+    // The WRAPPER computes `stage-reader-$(basename "$(dirname REAL_CLONE)")` and
+    // sanitises to the unit charset. For a safe token (the only kind reader.js
+    // produces) the two derivations are byte-identical — assert they agree by
+    // replicating the wrapper's shell derivation here.
+    const cp = require('node:child_process');
+    const cloneDir = '/var/lib/stage-reader/clones/sp1-aaaa1111/clone';
+    const shellUnit = cp.execFileSync('/bin/sh', ['-c',
+      'T="$(basename "$(dirname -- "$1")")"; T="$(printf "%s" "$T" | tr -c "A-Za-z0-9:_.-" "_")"; printf "stage-reader-%s" "$T"',
+      'sh', cloneDir,
+    ], { encoding: 'utf8' });
+    assert.equal(reader.buildSpawn(cloneDir, { HOME: '/h' }).unit, shellUnit,
+      'reader.js unit name byte-matches the wrapper shell derivation');
   });
 });
 

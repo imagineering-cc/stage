@@ -58,14 +58,41 @@ READER_HOME="${SCRATCH_ROOT}/home"
 READER_CONFIG="${SCRATCH_ROOT}/claude-config"
 READER_RUNTMP="${SCRATCH_ROOT}/run-tmp"
 
-# The claude binary. Hardcoded (not $PATH-resolved, not caller-supplied) so the
-# command being run as stage-reader is fixed. Adjust here if the Pi's claude lives
-# elsewhere; install-reader-sandbox.sh checks this path exists.
-CLAUDE_BIN='/usr/local/bin/claude'
-# Fallback to the per-user install location if the system path isn't present.
-[ -x "$CLAUDE_BIN" ] || CLAUDE_BIN='/home/nick/.local/bin/claude'
-
 die() { printf 'stage-reader-run: %s\n' "$1" >&2; exit 64; }
+
+# ── claude binary + its install tree (cage-match round-2 HIGH 2) ──────────────
+# A real `claude` install is a SHIM: ~/.local/bin/claude is a SYMLINK into
+# ~/.local/share/claude/versions/<ver>/... — binding only the shim file leaves
+# the version tree unmounted, so claude fails to load inside the cage and the
+# reader silently returns null findings forever. So the EXEC path (CLAUDE_BIN)
+# and the set of directories to bind read-only (CLAUDE_BINDS) are RESOLVED AT
+# INSTALL TIME by install-reader-sandbox.sh (which follows the symlink and walks
+# the install root) and written to this root-owned config. The wrapper sources
+# it; nick cannot edit it (root-owned, like the wrapper). If it's missing we fall
+# back to a best-effort default and STILL bind whatever resolves, but the
+# installer is the supported path.
+BINDS_CONF='/etc/stage-reader/binds.conf'
+CLAUDE_BIN=''
+CLAUDE_BINDS=()   # absolute dirs/files to BindReadOnlyPaths (the claude tree + node)
+if [ -r "$BINDS_CONF" ]; then
+  # shellcheck source=/dev/null
+  . "$BINDS_CONF"   # sets CLAUDE_BIN and CLAUDE_BINDS=(...)
+fi
+# Fallback resolution if the install config is absent (e.g. hand-run before the
+# installer wrote it): resolve the symlink ourselves and bind its install root.
+if [ -z "${CLAUDE_BIN:-}" ]; then
+  for cand in /usr/local/bin/claude /home/nick/.local/bin/claude; do
+    [ -x "$cand" ] && { CLAUDE_BIN="$cand"; break; }
+  done
+  if [ -n "${CLAUDE_BIN:-}" ]; then
+    real="$(readlink -f -- "$CLAUDE_BIN" 2>/dev/null || printf '%s' "$CLAUDE_BIN")"
+    # Bind the symlink path itself, the resolved binary, and the resolved
+    # binary's whole install root (covers the versions/<ver>/ tree).
+    CLAUDE_BINDS=("$CLAUDE_BIN" "$real" "$(dirname -- "$real")")
+    # If claude is the ~/.local layout, also bind the shared versions tree.
+    [ -d /home/nick/.local/share/claude ] && CLAUDE_BINDS+=(/home/nick/.local/share/claude)
+  fi
+fi
 
 # ── 1. argument shape — EXACTLY one caller argument (the clone dir) ────────────
 [ "$#" -eq 1 ] || die "usage: stage-reader-run <cloneDir>   (prompt on stdin; NO other args)"
@@ -115,9 +142,18 @@ id -u "$READER_USER" >/dev/null 2>&1 || die "system user '$READER_USER' does not
 # the prompt that reader.js wrote to our stdin reaches `claude -p` as its message
 # and the JSON envelope comes back on our stdout.
 #
-# A deterministic unit name keyed off the clone dir lets reader.js's kill-path
-# target the unit directly with `systemctl stop` as a belt-and-braces reaper.
-UNIT="stage-reader-$(basename "$REAL_CLONE")"
+# Deterministic AND UNIQUE-PER-RUN unit name (cage-match round-2 MED). The clone
+# is always `<runDir>/clone`, so basename(clone) is ALWAYS "clone" — every run
+# would collide on `stage-reader-clone`, letting the reaper target the wrong unit
+# and stale units pile up. Derive from the RUN dir (the parent), which carries the
+# per-run `<spotlightId|random>-<hex>` token. Sanitise to the systemd unit charset
+# (alnum + `:-_.`) defensively, though reader.js already produces safe tokens.
+RUN_TOKEN="$(basename "$(dirname -- "$REAL_CLONE")")"
+RUN_TOKEN="$(printf '%s' "$RUN_TOKEN" | tr -c 'A-Za-z0-9:_.-' '_')"
+[ -n "$RUN_TOKEN" ] || RUN_TOKEN="run"
+UNIT="stage-reader-${RUN_TOKEN}"
+# reader.js MUST compute this same name (basename of dirname of cloneDir) so its
+# kill-path reaper targets the same unit. Kept in lock-step there.
 
 # ── FILESYSTEM CONFINEMENT (cage-match FIX A) ─────────────────────────────────
 # A real ALLOWLIST filesystem, not merely read-only. ProtectSystem=strict alone
@@ -136,75 +172,93 @@ UNIT="stage-reader-$(basename "$REAL_CLONE")"
 # construction — there is nothing to enumerate. No InaccessiblePaths masking is
 # needed (and adding one for the clones root would conflict with the clone bind).
 #
-# The bound essential paths below cover a stock RPi OS Bookworm aarch64 layout.
-# install-reader-sandbox.sh validates each exists at install time and the on-Pi
-# checklist (ops/reader-sandbox.md) verifies claude actually starts inside the
-# cage. If a path is absent on a given host, the on-Pi run fails LOUDLY (claude
-# won't start) rather than silently widening the cage.
-exec systemd-run \
-  --uid="$READER_USER" \
-  --gid="$READER_GROUP" \
-  --unit="$UNIT" \
-  --wait \
-  --pipe \
-  --collect \
-  --quiet \
-  --working-directory="$REAL_CLONE" \
-  --property=KillMode=mixed \
-  --property=TimeoutStopSec=5 \
-  --setenv=HOME="$READER_HOME" \
-  --setenv=CLAUDE_CONFIG_DIR="$READER_CONFIG" \
-  --setenv=PATH="/usr/local/bin:/usr/bin:/bin" \
-  --setenv=TMPDIR="$READER_RUNTMP" \
-  --property=NoNewPrivileges=yes \
-  --property=PrivateTmp=yes \
-  --property=PrivateDevices=yes \
-  --property=TemporaryFileSystem=/:ro \
-  --property=BindReadOnlyPaths="$REAL_CLONE" \
-  --property=BindReadOnlyPaths=/usr/local/bin \
-  --property=BindReadOnlyPaths=/usr/bin \
-  --property=BindReadOnlyPaths=/bin \
-  --property=BindReadOnlyPaths=/usr/lib \
-  --property=BindReadOnlyPaths=/lib \
-  --property=BindReadOnlyPaths=-/usr/local/lib \
-  --property=BindReadOnlyPaths=-/lib64 \
-  --property=BindReadOnlyPaths=-/usr/local/sbin \
-  --property=BindReadOnlyPaths=-/etc/ssl \
-  --property=BindReadOnlyPaths=-/etc/ca-certificates \
-  --property=BindReadOnlyPaths=-/usr/share/ca-certificates \
-  --property=BindReadOnlyPaths=-/etc/resolv.conf \
-  --property=BindReadOnlyPaths=-/etc/nsswitch.conf \
-  --property=BindReadOnlyPaths=-/etc/hosts \
-  --property=BindReadOnlyPaths=-/etc/passwd \
-  --property=BindReadOnlyPaths=-/home/nick/.local/bin/claude \
-  --property=BindPaths="$READER_HOME" \
-  --property=BindPaths="$READER_CONFIG" \
-  --property=BindPaths="$READER_RUNTMP" \
-  --property=ProtectProc=invisible \
-  --property=ProcSubset=pid \
-  --property=ProtectKernelTunables=yes \
-  --property=ProtectKernelModules=yes \
-  --property=ProtectKernelLogs=yes \
-  --property=ProtectClock=yes \
-  --property=ProtectControlGroups=yes \
-  --property=ProtectHostname=yes \
-  --property=RestrictNamespaces=yes \
-  --property=RestrictRealtime=yes \
-  --property=RestrictSUIDSGID=yes \
-  --property=LockPersonality=yes \
-  --property=RemoveIPC=yes \
-  --property=RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
-  --property=SystemCallArchitectures=native \
-  --property=SystemCallFilter=@system-service \
-  --property=SystemCallFilter="~@privileged @mount @debug @reboot @swap @obsolete @resources" \
-  --property=CapabilityBoundingSet= \
-  --property=AmbientCapabilities= \
-  --property=UMask=0077 \
-  -- \
-  "$CLAUDE_BIN" \
-    -p \
-    --input-format text \
-    --output-format json \
-    --allowedTools Read,Grep,Glob \
-    --disallowedTools Write,Edit,Bash,WebFetch,WebSearch \
+# The static bound paths cover a stock RPi OS Bookworm aarch64 layout. The CLAUDE
+# tree binds are RESOLVED (install-time or fallback above), not hardcoded to a
+# single shim file (round-2 HIGH 2). install-reader-sandbox.sh validates the
+# claude tree at install time, and the on-Pi checklist (ops/reader-sandbox.md)
+# verifies claude actually STARTS and returns a non-null finding inside the cage.
+# If a path is absent on a given host, the on-Pi run fails LOUDLY (claude won't
+# start) rather than silently widening the cage.
+#
+# Built as an ARRAY so the dynamic CLAUDE_BINDS (the resolved claude install
+# tree + node) can be appended without a fragile backslash-continued literal.
+ARGS=(
+  --uid="$READER_USER"
+  --gid="$READER_GROUP"
+  --unit="$UNIT"
+  --wait
+  --pipe
+  --collect
+  --quiet
+  --working-directory="$REAL_CLONE"
+  --property=KillMode=mixed
+  --property=TimeoutStopSec=5
+  --setenv=HOME="$READER_HOME"
+  --setenv=CLAUDE_CONFIG_DIR="$READER_CONFIG"
+  --setenv=PATH="/usr/local/bin:/usr/bin:/bin"
+  --setenv=TMPDIR="$READER_RUNTMP"
+  --property=NoNewPrivileges=yes
+  --property=PrivateTmp=yes
+  --property=PrivateDevices=yes
+  --property=TemporaryFileSystem=/:ro
+  --property=BindReadOnlyPaths="$REAL_CLONE"
+  --property=BindReadOnlyPaths=/usr/bin
+  --property=BindReadOnlyPaths=/bin
+  --property=BindReadOnlyPaths=/usr/lib
+  --property=BindReadOnlyPaths=/lib
+  --property=BindReadOnlyPaths=-/usr/local/bin
+  --property=BindReadOnlyPaths=-/usr/local/lib
+  --property=BindReadOnlyPaths=-/lib64
+  --property=BindReadOnlyPaths=-/usr/local/sbin
+  --property=BindReadOnlyPaths=-/etc/ssl
+  --property=BindReadOnlyPaths=-/etc/ca-certificates
+  --property=BindReadOnlyPaths=-/usr/share/ca-certificates
+  --property=BindReadOnlyPaths=-/etc/resolv.conf
+  --property=BindReadOnlyPaths=-/etc/nsswitch.conf
+  --property=BindReadOnlyPaths=-/etc/hosts
+  --property=BindReadOnlyPaths=-/etc/passwd
+)
+# The resolved claude install tree + node runtime (round-2 HIGH 2). Each entry is
+# bound read-only; `-` prefix makes a missing one non-fatal (the binary's own bind
+# is the load-bearing one and the prereq check above asserts CLAUDE_BIN exists).
+# The ${#...} guard keeps an EMPTY array safe under `set -u` on older bash (the
+# Pi's bash 5 is fine; this stays portable).
+if [ "${#CLAUDE_BINDS[@]}" -gt 0 ]; then
+  for b in "${CLAUDE_BINDS[@]}"; do
+    [ -n "$b" ] && ARGS+=(--property=BindReadOnlyPaths=-"$b")
+  done
+fi
+ARGS+=(
+  --property=BindPaths="$READER_HOME"
+  --property=BindPaths="$READER_CONFIG"
+  --property=BindPaths="$READER_RUNTMP"
+  --property=ProtectProc=invisible
+  --property=ProcSubset=pid
+  --property=ProtectKernelTunables=yes
+  --property=ProtectKernelModules=yes
+  --property=ProtectKernelLogs=yes
+  --property=ProtectClock=yes
+  --property=ProtectControlGroups=yes
+  --property=ProtectHostname=yes
+  --property=RestrictNamespaces=yes
+  --property=RestrictRealtime=yes
+  --property=RestrictSUIDSGID=yes
+  --property=LockPersonality=yes
+  --property=RemoveIPC=yes
+  --property=RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX"
+  --property=SystemCallArchitectures=native
+  --property=SystemCallFilter=@system-service
+  --property=SystemCallFilter="~@privileged @mount @debug @reboot @swap @obsolete @resources"
+  --property=CapabilityBoundingSet=
+  --property=AmbientCapabilities=
+  --property=UMask=0077
+  --
+  "$CLAUDE_BIN"
+    -p
+    --input-format text
+    --output-format json
+    --allowedTools Read,Grep,Glob
+    --disallowedTools Write,Edit,Bash,WebFetch,WebSearch
     --permission-mode dontAsk
+)
+exec systemd-run "${ARGS[@]}"

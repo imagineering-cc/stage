@@ -148,9 +148,24 @@ ALLOWLIST (cage-match FIX A), not a read-only host:
 |---|---|
 | `TemporaryFileSystem=/:ro` | a fresh **empty** read-only root — the entire host filesystem is GONE inside the cage; only what we bind back exists |
 | `BindReadOnlyPaths=<cloneDir>` | the repo bytes, read-only. The clone's **parent** (`clones/`) is NOT bound, so **sibling runs are absent by construction** |
-| `BindReadOnlyPaths=/usr/bin /bin /usr/lib /lib …, certs, /etc/resolv.conf` | the read-only runtime essentials claude/node need to start + resolve DNS |
+| `BindReadOnlyPaths=/usr/bin /bin /usr/lib /lib …, certs, /etc/resolv.conf` | the read-only runtime essentials claude/node need to start + resolve DNS (node is `/usr/bin/node`, under `/usr/bin`) |
+| `BindReadOnlyPaths=<resolved claude tree>` | the REAL claude install (round-2 HIGH 2 — see below): the shim path, the `readlink -f` target, its install dir, and `~/.local/share/claude` (the `versions/<ver>/` tree). **Not** just the shim file. |
 | `BindPaths=<home> <config> <run-tmp>` | the ONLY writable paths (stage-reader's own dirs) |
 | `PrivateTmp=yes`, `PrivateDevices=yes` | private `/tmp`; a minimal `/dev` |
+
+> **round-2 HIGH 2 — bind the REAL claude tree, not the shim.** A native claude
+> install is a **shim**: `~/.local/bin/claude` is a *symlink* into
+> `~/.local/share/claude/versions/<ver>/…`. With `TemporaryFileSystem=/:ro`,
+> binding only the shim file leaves the version tree unmounted, so `claude` execs
+> the shim and **fails to load** — and the reader would silently return null
+> findings forever (a broken cage that never runs is worse than no cage). So
+> `install-reader-sandbox.sh` resolves `readlink -f "$(command -v claude)"`,
+> computes the install root, and writes the bind set to a **root-owned**
+> `/etc/stage-reader/binds.conf` (`CLAUDE_BIN=…` + `CLAUDE_BINDS=(…)`). The
+> wrapper *sources* that file and binds each entry read-only. (The wrapper also
+> has a self-resolving fallback if the config is absent.) **The on-Pi checklist's
+> "real read → non-null finding" step is the gate that proves claude actually
+> starts inside the cage** — do not trust the cage until it passes.
 
 So `/home/nick`, `ops/*.local.env`, `stage-state.json`, other users' files, and
 sibling clones are **not mounted** — they don't exist in the cage, not merely
@@ -227,11 +242,24 @@ privilege) and the unit name is deterministic (`stage-reader-<clone-basename>`).
 Node's `SIGKILL` to `sudo` is the last-resort reaper of the sudo/systemd-run
 layer; a stray transient unit is `--collect`-cleaned regardless.
 
-> The `sudo -n systemctl stop` reaper needs a sudoers entry for `systemctl` to be
-> privileged; without one it's a harmless no-op and the signal chain above does
-> the work. If you want the belt-and-braces reaper to be privileged, add
-> `nick ALL=(root) NOPASSWD: /usr/bin/systemctl stop stage-reader-*, /usr/bin/systemctl kill stage-reader-*`
-> to the sudoers drop-in — optional, not required for correctness.
+> **round-2 HIGH 1 — the reaper IS now authorized.** The earlier draft left the
+> `sudo -n systemctl …` reaper unauthorized, so it was a silently-swallowed no-op
+> (a nominal FIX C that fell back to the signal chain it was meant to backstop).
+> `install-reader-sandbox.sh` now installs a **second, narrow** sudoers grant —
+> `nick ALL=(root) NOPASSWD: <systemctl> stop stage-reader-*, <systemctl> kill
+> stage-reader-*` (the installer resolves systemctl's absolute path; it grants
+> both the PATH-resolved and `readlink -f` real paths if they differ). Scoped to
+> `stage-reader-*` units and the two reaper verbs ONLY — never a blanket
+> `systemctl`. The reaper now genuinely tears the cage unit down on timeout.
+>
+> **Unique unit name (round-2 MED):** the unit is
+> `stage-reader-<run-token>` where `<run-token>` is the per-run
+> `<spotlightId|random>-<hex>` (derived from the **run dir**, the parent of
+> `clone`). The earlier `basename(clone)` was always `"clone"` → every run
+> collided on `stage-reader-clone`, so the reaper could target the wrong run's
+> unit and stale units piled up. reader.js (`basename(dirname(cloneDir))`) and the
+> wrapper (`basename "$(dirname REAL_CLONE)"`, sanitised to the unit charset)
+> compute the **same** name, verified byte-for-byte by a unit test.
 
 ---
 
@@ -267,14 +295,27 @@ sudo install -d -o stage-reader -g stage-reader -m 0700 /var/lib/stage-reader/ho
 sudo install -d -o stage-reader -g stage-reader -m 0700 /var/lib/stage-reader/claude-config
 sudo install -d -o stage-reader -g stage-reader -m 0700 /var/lib/stage-reader/run-tmp
 
-# 3. the root-owned wrapper (NOT writable by nick)
+# 3. resolve the REAL claude tree → /etc/stage-reader/binds.conf (round-2 HIGH 2)
+#    claude is a SHIM (~/.local/bin/claude → ~/.local/share/claude/versions/<ver>/);
+#    bind the resolved tree, not just the shim, or claude won't load in the cage.
+LINK="$(command -v claude)"; REAL="$(readlink -f "$LINK")"
+sudo install -d -o root -g root -m 0755 /etc/stage-reader
+printf 'CLAUDE_BIN=%q\nCLAUDE_BINDS=( %q %q %q %q )\n' \
+  "$LINK" "$LINK" "$REAL" "$(dirname "$REAL")" "$HOME/.local/share/claude" \
+  | sudo tee /etc/stage-reader/binds.conf >/dev/null
+sudo chmod 0644 /etc/stage-reader/binds.conf
+
+# 3b. the root-owned wrapper (NOT writable by nick)
 sudo install -o root -g root -m 0755 ~/stage/ops/stage-reader-run /usr/local/sbin/stage-reader-run
 
-# 4. the NOPASSWD sudoers drop-in — VALIDATE BEFORE INSTALL (cage-match FIX E).
-#    Write a root-owned TEMP file, visudo -cf it, and ONLY move it into
-#    /etc/sudoers.d/ on success — a malformed file there can lock out sudo.
+# 4. the NOPASSWD sudoers drop-in — VALIDATE BEFORE INSTALL (FIX E). TWO grants:
+#    the pinned wrapper, AND the narrow kill-path reaper (round-2 HIGH 1) scoped
+#    to `systemctl stop|kill stage-reader-*` only. Resolve systemctl's abs path.
+SCTL="$(command -v systemctl)"
 TMP="$(mktemp)"; sudo chown root:root "$TMP"; sudo chmod 0440 "$TMP"
-printf '%s\n' 'nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-run *' | sudo tee "$TMP" >/dev/null
+{ printf 'nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-run *\n'
+  printf 'nick ALL=(root) NOPASSWD: %s stop stage-reader-*, %s kill stage-reader-*\n' "$SCTL" "$SCTL"
+} | sudo tee "$TMP" >/dev/null
 sudo visudo -cf "$TMP"                            # MUST print "parsed OK" — abort if not
 sudo install -o root -g root -m 0440 "$TMP" /etc/sudoers.d/stage-reader
 sudo visudo -c                                    # re-validate the whole tree
@@ -356,19 +397,42 @@ is checked on the Pi, the OS confinement is **claimed, not verified**.
    "${PROBE[@]}" -- /bin/sh -c 'echo "${ANTHROPIC_API_KEY:-UNSET}"'
    # EXPECT: UNSET
    ```
-5. **A real read produces a genuine finding** against a trusted repo, and:
+5. **A real read produces a genuine NON-NULL finding** against a trusted repo —
+   THE load-bearing gate (round-2 HIGH 2). If claude can't start inside the cage
+   (wrong/incomplete claude binds), the reader silently returns `{finding:null}`
+   forever — a broken cage that never runs. So this MUST yield a real finding that
+   cites real files, not null. Confirm also:
+   - the contained process is `stage-reader` (item 1);
    - no zombie `claude` / no leftover `stage-reader-*` unit afterwards
      (`systemctl list-units 'stage-reader-*'` is empty);
    - the per-run scratch dir under `/var/lib/stage-reader/clones/` is **wiped**.
-6. **Timeout path:** set `STAGE_READER_TIMEOUT_MS=2000`, point at a larger repo,
-   confirm the run is killed and the cage unit torn down within a few seconds.
+   If it returns null: check `journalctl` for the transient unit and
+   `cat /etc/stage-reader/binds.conf` — the claude install tree is the usual cause.
+6. **Timeout path + reaper authorization (round-2 HIGH 1).** Set
+   `STAGE_READER_TIMEOUT_MS=2000`, point at a larger repo, confirm the run is
+   killed and the cage unit torn down within a few seconds. Then confirm the
+   reaper grant actually works (not a swallowed no-op):
+   ```bash
+   sudo -n systemctl stop stage-reader-nonexistent   # EXPECT: authorized (no
+   # password prompt, exits 0/"unit not loaded") — NOT "a password is required"
+   # or "not allowed". A password/denied error means the reaper grant is missing.
+   sudo grep -n 'systemctl .* stage-reader-\*' /etc/sudoers.d/stage-reader  # the grant
+   ```
+7. **Unit names are unique per run (round-2 MED).** Kick two reads (or inspect a
+   prior run's journal) and confirm the transient units differ —
+   `stage-reader-<spotlightId|rand>-<hex>`, NOT a shared `stage-reader-clone`.
 
 ## What is verified now vs. unverified-until-Pi
 
-**Verified now (in CI / on this branch — 34 `reader.test.js` tests + 36 smoke):**
+**Verified now (in CI / on this branch — 35 `reader.test.js` tests + 36 smoke):**
 - Direct-mode (opt-out) behaviour is unchanged.
 - **Fail-safe polarity (FIX F):** `buildSpawn` with NO env selects the cage
   (`command === 'sudo'`), not direct.
+- **Unique unit name (round-2 MED):** `buildSpawn` derives the unit from the run
+  dir (`stage-reader-<run-token>`), distinct per run, and a unit test asserts it
+  byte-matches the wrapper's shell derivation (`basename(dirname(clone))`,
+  sanitised). The wrapper builds its systemd-run argv as an array so the resolved
+  claude binds append cleanly (`bash -n` clean).
 - **Pinned command (FIX B):** in sandbox mode `buildSpawn` produces EXACTLY
   `['-n', <wrapper>, <cloneDir>]` — no `--`, no `claude`, no tool flags after the
   clone dir — and the prompt rides `stdinPrompt` (a unit test asserts the exact
@@ -398,9 +462,18 @@ the load-bearing security claims, CLAIMED not verified until the checklist runs:
   claude -p` and produces a real finding (checklist item 5). The
   `claude -p`-reads-stdin behaviour was confirmed against the local `claude`
   binary, but NOT through the full sudo→systemd-run `--pipe` chain.
+- **That claude actually STARTS inside the cage and returns a NON-NULL finding**
+  (round-2 HIGH 2, checklist item 5). The claude-tree resolution
+  (`readlink -f` → `/etc/stage-reader/binds.conf` → wrapper sources it) is
+  designed and the conf round-trips in a local shell test, but whether the Pi's
+  specific shim+versions layout binds *completely* enough for claude to load is
+  the load-bearing unverified claim. A null finding here = a broken cage.
+- **That the reaper grant is authorized** (round-2 HIGH 1, checklist item 6): the
+  installer adds the narrow `systemctl stop|kill stage-reader-*` sudoers rule, but
+  `sudo -n systemctl …` succeeding (vs. password-prompting / denied) is on-Pi.
 - That the allowlist filesystem (item 2 — `/home/nick` AND sibling clones absent),
   the egress port-filter (item 3), run-as-stage-reader (item 1), the pinned-command
-  rejection (item 0), and the SIGTERM→unit-stop + `systemctl stop` reaper
-  (item 6, FIX C) all behave as designed.
+  rejection (item 0), and the SIGTERM→unit-stop + authorized `systemctl stop`
+  reaper (item 6) all behave as designed.
 - The residual TOCTOU window on the clone dir (FIX D) is narrowed, not closed —
   see "Filesystem ownership + the TOCTOU window" above.
