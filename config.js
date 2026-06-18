@@ -25,6 +25,16 @@ const OPENAI_API_KEY = process.env.STAGE_OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.STAGE_OPENAI_MODEL || 'gpt-5.4-mini';
 const GITHUB_TOKEN = process.env.STAGE_GITHUB_TOKEN || '';
 const SHOW_MODES = new Set(['welcome', 'free-jukebox', 'sprint-build', 'sprint-share', 'sprint-break', 'cool-down']);
+
+// M5 personal-pulse bound. A guest gesture (phone shake / deliberate submit)
+// injects a TRANSIENT, identity-keyed burst into the shared room canvas via the
+// `visualEvent` wire field. This is the per-token cooldown that keeps the burst
+// BOUNDED rather than continuous: no single participant may overwrite the shared
+// background more often than once per this window, so the room can't be spammed
+// or held by one phone. Distinct from a sub-second anti-double-fire debounce —
+// this is the M5 "distinct variations without continuous overwriting" invariant.
+// Env-overridable so tests can pin a deterministic window; production default 4s.
+const GESTURE_COOLDOWN_MS = Number(process.env.STAGE_GESTURE_COOLDOWN_MS || 4000);
 const VISUAL_THEMES = new Set(['aurora', 'nebula', 'prism', 'embers', 'ocean']);
 
 // Sprint-mode (autonomous Dreamfinder host) timing constants. WIND_DOWN_MS is
@@ -55,6 +65,7 @@ module.exports = {
   GITHUB_TOKEN,
   SHOW_MODES,
   VISUAL_THEMES,
+  GESTURE_COOLDOWN_MS,
   WIND_DOWN_MS,
   DONE_HOLD_MS,
   CHIME_LEAD_MS,

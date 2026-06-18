@@ -120,9 +120,15 @@ single source of truth.
   "editedBy": string, "editedAt": number|null }
 ```
 
-**VisualEvent** (a short-lived phone-shake burst; auto-clears after ~5s)
+**VisualEvent** (a short-lived, identity-keyed phone-shake "personal pulse";
+auto-clears after ~5s). Identity-keyed: `color` is the requester's assigned
+Dreamfinder colour and `requesterName` their label, so the room renders whose
+pulse it is. Bounded: a per-token cooldown on `/api/gesture` (see route table)
+keeps a participant from continuously overwriting the shared canvas. The pulse
+is a TRANSIENT additive mutation — it never touches the persistent `visuals`.
 ```jsonc
 { "id": string, "type": "shake", "intensity": number, // 0..1
+  "magnitude": number, // 0..1, server-clamped twin of intensity (additive); older frontends ignore it
   "color": string, "requesterName": string, "at": number }
 ```
 
@@ -265,7 +271,7 @@ treat `eventClosed: true` as "render the closed room", not as a hard error.
 | GET | `/api/votes?t=token` | — | this token's upvoted + owned track ids |
 | POST | `/api/upvote` | `{token, trackId}` | toggle one upvote (gated) |
 | POST | `/api/visuals` | `{token, theme?, energy?, complexity?, hue?}` | evolve the generative background (gated) |
-| POST | `/api/gesture` | `{token, type:"shake", intensity}` | transient visual burst (gated, rate-limited) |
+| POST | `/api/gesture` | `{token, type:"shake", intensity}` | identity-keyed transient personal pulse → `visualEvent` (gated; **per-token cooldown** — a too-soon pulse returns `429 {retryAfterMs}`, so one phone can't continuously overwrite the shared canvas) |
 | POST | `/api/share/request` | `{token, kind:"share"\|"progress"}` | request to present from your phone (gated; **requires `consentRecording`** → 409 if not). Returns `{id, status}` — the opaque `id` is how you find your own row |
 | POST | `/api/share/withdraw` | `{token}` | leave the presentation queue (any non-terminal state) |
 | POST | `/api/spotlight/transcript` | `{token, transcript, isFinal}` | stream live speech text **as the admitted presenter** — see the gate below |

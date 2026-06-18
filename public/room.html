@@ -1543,7 +1543,9 @@
     if (createdAt > 0 && createdAt < 1000000000000) createdAt *= 1000;
     if (Number.isFinite(createdAt) && Date.now() - createdAt > 5000) return;
 
-    const intensity = clamp01(nextEvent.intensity, 0.65);
+    // Prefer the server-clamped `magnitude` (M5 bounded scalar); fall back to the
+    // legacy `intensity` so an older engine payload still renders. Both are 0..1.
+    const intensity = clamp01(nextEvent.magnitude ?? nextEvent.intensity, 0.65);
     const seed = hashValue(nextEvent.id || nextEvent.requesterName);
     const color = safeEventColor(nextEvent.color);
     const particleTotal = reducedMotion ? 0 : Math.round(22 + intensity * 50);

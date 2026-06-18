@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const { JOIN_URL, PUBLIC_DIR, SHOW_MODES } = require('./config');
+const { JOIN_URL, PUBLIC_DIR, SHOW_MODES, GESTURE_COOLDOWN_MS } = require('./config');
 const {
   room,
   identities,
@@ -323,7 +323,13 @@ async function requestHandler(req, res) {
     return send(res, 200, { visuals: room.visuals });
   }
 
-  // guest: phone motion triggers a short visual response, rate-limited per person
+  // guest: phone motion triggers a short, PERSONAL visual response (M5). The burst
+  // is identity-keyed — it carries THIS participant's assigned Dreamfinder color so
+  // the room shows whose pulse it is — and BOUNDED: a per-token cooldown
+  // (GESTURE_COOLDOWN_MS) keeps a guest from continuously overwriting the shared
+  // background. The pulse is a transient additive mutation to `visualEvent`; it
+  // NEVER touches the persistent base `room.visuals`, so one phone can colour the
+  // room for a moment but cannot take it over. That bound IS the M5 invariant.
   if (method === 'POST' && p === '/api/gesture') {
     if (!requireOpenEvent(res)) return;
     const body = await readBody(req);
@@ -331,14 +337,24 @@ async function requestHandler(req, res) {
     if (!id) return send(res, 401, { error: 'unknown token' });
     if (body.type !== 'shake') return send(res, 400, { error: 'unknown gesture' });
     const lastAt = gestureTimes.get(body.token) || 0;
-    if (Date.now() - lastAt < 900) return send(res, 429, { error: 'shake too frequent' });
+    if (Date.now() - lastAt < GESTURE_COOLDOWN_MS) {
+      // Bounded, not continuous: a too-soon second pulse is rejected so the shared
+      // room canvas can't be spammed/held by one participant. Surface the wait so a
+      // frontend can show a calm "your pulse is still glowing" rather than an error.
+      const retryAfterMs = GESTURE_COOLDOWN_MS - (Date.now() - lastAt);
+      return send(res, 429, { error: 'pulse too frequent', retryAfterMs });
+    }
     markAttendance(id); // only after the gesture is accepted — a rejected shake leaves no attendance tick
     gestureTimes.set(body.token, Date.now());
+    const intensity = clamp(body.intensity, 0, 1, 0.5);
     room.visualEvent = {
       id: crypto.randomBytes(4).toString('hex'),
       type: 'shake',
-      intensity: clamp(body.intensity, 0, 1, 0.5),
-      color: id.color,
+      intensity,
+      // Server-derived, guaranteed-bounded 0..1 scalar a frontend can trust without
+      // re-validating `intensity`. Additive wire field; older frontends ignore it.
+      magnitude: intensity,
+      color: id.color,            // the requester's assigned Dreamfinder colour — the pulse is THEIRS
       requesterName: identityDisplayName(id),
       at: Date.now(),
     };
