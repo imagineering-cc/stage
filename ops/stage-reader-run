@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+#
+# stage-reader-run — the ONLY thing nick is permitted to run as root (via a
+# NOPASSWD sudoers drop-in). It is the OS-confinement cage for The Reader
+# (reader.js): it drops privilege to the unprivileged `stage-reader` system user
+# and runs a FIXED, PINNED, read-only `claude` invocation under a tight systemd
+# confinement property set, with cwd bound to an attacker-controllable clone.
+#
+# ── THE TRUST BOUNDARY: THE COMMAND IS PINNED, ONLY THE CLONE DIR IS CALLER-SET ─
+# The sudoers rule is `nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-run *`.
+# That grant means "run THE reader operation", NOT "run anything as stage-reader".
+# This script enforces that by:
+#   1. Accepting EXACTLY ONE caller argument — the clone dir. There is NO
+#      caller-controlled argv after it. (cage-match FIX B: the previous design
+#      passed arbitrary argv after `--` verbatim to systemd-run, so any code
+#      running as nick could `sudo stage-reader-run <validclone> -- /bin/sh -c ...`
+#      and run ANYTHING as stage-reader inside the cage — reading stage-reader's
+#      OAuth token and exfiltrating over the allowed 443. Caging the WHERE (cwd)
+#      without caging the WHAT was the hole. Now the WHAT is hardcoded below.)
+#   2. HARDCODING the claude binary and its fixed read-only flags below. The
+#      caller cannot inject, append, or alter a single claude flag.
+#   3. Reading the (trusted, reader.js-authored) PROMPT from THIS PROCESS'S STDIN
+#      and piping it into `claude -p` via the unit's stdin — NOT as argv. So the
+#      prompt cannot smuggle a flag (a leading `--dangerously-...` in the prompt
+#      text is stdin data to `claude -p`, never an argument).
+# The clone dir is still validated (realpath containment, no `..`/symlink escape)
+# because it names a filesystem location the cage will bind-mount; that validation
+# is defence-in-depth on top of the pinned command, and keeps the script safe even
+# if invoked directly. If you weaken EITHER the command-pinning OR the clone-dir
+# validation, you weaken the whole cage.
+#
+# Usage (exactly): stage-reader-run <cloneDir>      [prompt on stdin]
+#   <cloneDir>  absolute path that MUST resolve (realpath) under
+#               /var/lib/stage-reader/clones/ and be an existing directory.
+#               No `..`, no symlink escape. This is the ONLY caller argument.
+#   stdin       the hunt prompt, authored by reader.js (trusted). Piped to
+#               `claude -p` as its message; never interpreted as argv.
+#
+# Run by: reader.js → `sudo -n /usr/local/sbin/stage-reader-run <cloneDir>` with
+#         the prompt written to the child's stdin.
+# Installed by: ops/install-reader-sandbox.sh (root-owned, mode 0755, NOT writable
+# by nick — so nick cannot edit the very thing he's trusted to run as root).
+#
+set -euo pipefail
+
+# ── fixed configuration (NOT taken from the environment; this runs as root) ───
+# The dir that clone dirs MUST live under. NARROWED (cage-match FIX D) from the
+# scratch root to the clones/ subdir specifically, so the validated handoff can
+# never resolve to a reserved control dir (home/config/run-tmp) and the TOCTOU
+# surface is the single clones/ tree, not the whole root.
+CLONES_DIR='/var/lib/stage-reader/clones'
+SCRATCH_ROOT='/var/lib/stage-reader'
+READER_USER='stage-reader'
+READER_GROUP='stage-reader'
+# stage-reader's OWN claude config/home (separate OAuth token, mode 0600), and a
+# writable run-tmp. These three are the ONLY writable paths the cage permits.
+READER_HOME="${SCRATCH_ROOT}/home"
+READER_CONFIG="${SCRATCH_ROOT}/claude-config"
+READER_RUNTMP="${SCRATCH_ROOT}/run-tmp"
+
+die() { printf 'stage-reader-run: %s\n' "$1" >&2; exit 64; }
+
+# ── binds.conf integrity guard (round-4 review, Carnot) ───────────────────────
+# We are about to `.` (source) binds.conf AS ROOT — that makes it root CODE behind
+# the NOPASSWD grant. The installer writes it root:root 0644, but TRUSTING that at
+# runtime is the bug; we VERIFY it. Returns 0 only if the file is: not a symlink, a
+# regular file, owned by uid 0, NOT group/other-writable, AND its parent dir is
+# likewise root-owned and not group/other-writable (so it can't be swapped under
+# us). Any stat failure (e.g. BSD stat lacking -c) → return 1 = fail-closed, and the
+# caller falls through to the self-contained fallback resolution (which sources
+# NOTHING). Fail-closed: an unverifiable binds.conf is never executed.
+binds_conf_trusted() {
+  local f="$1" d perm g o
+  [ ! -L "$f" ] && [ -f "$f" ] || return 1
+  d="$(dirname -- "$f")"
+  [ "$(stat -c '%u' -- "$f" 2>/dev/null)" = "0" ] || return 1
+  [ "$(stat -c '%u' -- "$d" 2>/dev/null)" = "0" ] || return 1
+  for p in "$f" "$d"; do
+    perm="$(stat -c '%a' -- "$p" 2>/dev/null)" || return 1
+    g="${perm: -2:1}"; o="${perm: -1}"          # group + other octal digits
+    case "$g" in 2|3|6|7) return 1 ;; esac       # group-writable → reject
+    case "$o" in 2|3|6|7) return 1 ;; esac       # other-writable → reject
+  done
+  return 0
+}
+
+# ── nearest-parent versions/<ver> dir (round-4 review, Carnot) ────────────────
+# Given the resolved claude binary path, return the ancestor whose PARENT dir is
+# literally named "versions" (NEAREST to the binary — NOT the first `/versions/`
+# occurrence, which `${x%%/versions/*}` would wrongly pick for a path that contains
+# `versions` more than once, binding an over-broad subtree). Falls back to the
+# binary's own dir when there is no `versions` ancestor.
+claude_version_dir() {
+  local d; d="$(dirname -- "$1")"
+  while [ "$d" != "/" ] && [ "$d" != "." ] && [ -n "$d" ]; do
+    if [ "$(basename -- "$(dirname -- "$d")")" = "versions" ]; then
+      printf '%s' "$d"; return 0
+    fi
+    d="$(dirname -- "$d")"
+  done
+  dirname -- "$1"
+}
+
+# ── claude binary + its install tree (cage-match round-2 HIGH 2) ──────────────
+# A real `claude` install is a SHIM: ~/.local/bin/claude is a SYMLINK into
+# ~/.local/share/claude/versions/<ver>/... — binding only the shim file leaves
+# the version tree unmounted, so claude fails to load inside the cage and the
+# reader silently returns null findings forever. So the EXEC path (CLAUDE_BIN)
+# and the set of directories to bind read-only (CLAUDE_BINDS) are RESOLVED AT
+# INSTALL TIME by install-reader-sandbox.sh (which follows the symlink and walks
+# the install root) and written to this root-owned config. The wrapper sources
+# it; nick cannot edit it (root-owned, like the wrapper). If it's missing we fall
+# back to a best-effort default and STILL bind whatever resolves, but the
+# installer is the supported path.
+BINDS_CONF='/etc/stage-reader/binds.conf'
+CLAUDE_BIN=''
+CLAUDE_BINDS=()   # absolute dirs/files to BindReadOnlyPaths (the claude tree + node)
+if [ -r "$BINDS_CONF" ]; then
+  if binds_conf_trusted "$BINDS_CONF"; then
+    # shellcheck source=/dev/null
+    . "$BINDS_CONF"   # sets CLAUDE_BIN and CLAUDE_BINDS=(...)
+  else
+    printf 'stage-reader-run: %s failed its integrity check (not a root-owned, non-writable regular file); IGNORING it and using fallback resolution\n' "$BINDS_CONF" >&2
+  fi
+fi
+# Fallback resolution if the install config is absent (e.g. hand-run before the
+# installer wrote it): resolve the symlink ourselves and bind its install root.
+if [ -z "${CLAUDE_BIN:-}" ]; then
+  for cand in /usr/local/bin/claude /home/nick/.local/bin/claude; do
+    [ -x "$cand" ] && { CLAUDE_BIN="$cand"; break; }
+  done
+  if [ -n "${CLAUDE_BIN:-}" ]; then
+    real="$(readlink -f -- "$CLAUDE_BIN" 2>/dev/null || printf '%s' "$CLAUDE_BIN")"
+    # Bind the symlink path itself, the resolved binary, and the resolved binary's
+    # own dir. NARROWED (round-3 MED): bind ONLY the versions/<ver>/ subtree, never
+    # the whole ~/.local/share/claude tree, so the caged claude cannot Read/Grep the
+    # rest of the install root. Extract `.../versions/<ver>` from the resolved path.
+    CLAUDE_BINDS=("$CLAUDE_BIN" "$real" "$(dirname -- "$real")")
+    ver_dir="$(claude_version_dir "$real")"
+    [ -n "$ver_dir" ] && CLAUDE_BINDS+=("$ver_dir")
+  fi
+fi
+
+# ── 1. argument shape — EXACTLY one caller argument (the clone dir) ────────────
+[ "$#" -eq 1 ] || die "usage: stage-reader-run <cloneDir>   (prompt on stdin; NO other args)"
+CLONE_DIR="$1"
+
+# ── 2. clone-dir containment (defence-in-depth on the pinned command) ─────────
+# Must be an existing directory. Resolve symlinks with realpath -e (fails if any
+# component is missing), then require the resolved path to be strictly UNDER
+# /var/lib/stage-reader/clones/. realpath collapses `..` and follows symlinks, so
+# a crafted `..`/symlink path that escapes is caught here.
+case "$CLONE_DIR" in
+  /*) : ;;                       # must be absolute
+  *) die "clone dir must be an absolute path: $CLONE_DIR" ;;
+esac
+[ -d "$CLONE_DIR" ] || die "clone dir is not a directory: $CLONE_DIR"
+
+REAL_CLONE="$(realpath -e -- "$CLONE_DIR")" || die "clone dir does not resolve: $CLONE_DIR"
+REAL_CLONES="$(realpath -e -- "$CLONES_DIR")" || die "clones dir missing: $CLONES_DIR (run install-reader-sandbox.sh)"
+
+# Strict containment: REAL_CLONE must be REAL_CLONES/<something>, never the
+# clones dir itself and never outside it. The trailing-slash compare avoids the
+# /var/lib/stage-reader/clones-evil prefix-collision bug.
+case "$REAL_CLONE/" in
+  "$REAL_CLONES"/*) : ;;
+  *) die "clone dir escapes clones root ($REAL_CLONE not under $REAL_CLONES)" ;;
+esac
+[ "$REAL_CLONE" = "$REAL_CLONES" ] && die "clone dir may not BE the clones root"
+
+# ── 3. require the confinement prerequisites exist ────────────────────────────
+# These are laid down by install-reader-sandbox.sh. If they are missing we REFUSE
+# to run rather than silently run with a weaker cage.
+id -u "$READER_USER" >/dev/null 2>&1 || die "system user '$READER_USER' does not exist (run install-reader-sandbox.sh)"
+[ -d "$READER_CONFIG" ] || die "reader claude-config dir missing: $READER_CONFIG"
+[ -d "$READER_HOME" ] || die "reader home dir missing: $READER_HOME"
+[ -d "$READER_RUNTMP" ] || die "reader run-tmp missing: $READER_RUNTMP"
+[ -x "$CLAUDE_BIN" ] || die "claude binary not found/executable at $CLAUDE_BIN"
+
+# ── 4. exec the cage ──────────────────────────────────────────────────────────
+# We `exec` systemd-run so THIS process is REPLACED by systemd-run. That matters
+# for the kill path: reader.js spawns `sudo stage-reader-run ...`; sudo forwards
+# SIGTERM/SIGINT to its (now systemd-run) child; with `--wait`, systemd-run
+# reacts to a received SIGTERM by stopping the transient unit (KillMode=mixed,
+# TimeoutStopSec=5), which tears down the contained `claude` in its cgroup. So a
+# Node-side `child.kill('SIGTERM')` propagates all the way to the workload.
+#
+# --pipe forwards THIS process's stdin/stdout/stderr to the contained claude, so
+# the prompt that reader.js wrote to our stdin reaches `claude -p` as its message
+# and the JSON envelope comes back on our stdout.
+#
+# Deterministic AND UNIQUE-PER-RUN unit name (cage-match round-2 MED). The clone
+# is always `<runDir>/clone`, so basename(clone) is ALWAYS "clone" — every run
+# would collide on `stage-reader-clone`, letting the reaper target the wrong unit
+# and stale units pile up. Derive from the RUN dir (the parent), which carries the
+# per-run `<spotlightId|random>-<hex>` token. Sanitise to the systemd unit charset
+# (alnum + `:-_.`) defensively, though reader.js already produces safe tokens.
+RUN_TOKEN="$(basename "$(dirname -- "$REAL_CLONE")")"
+RUN_TOKEN="$(printf '%s' "$RUN_TOKEN" | tr -c 'A-Za-z0-9:_.-' '_')"
+[ -n "$RUN_TOKEN" ] || RUN_TOKEN="run"
+UNIT="stage-reader-${RUN_TOKEN}"
+# reader.js MUST compute this same name (basename of dirname of cloneDir) so its
+# kill-path reaper targets the same unit. Kept in lock-step there.
+
+# ── FILESYSTEM CONFINEMENT (cage-match FIX A) ─────────────────────────────────
+# A real ALLOWLIST filesystem, not merely read-only. ProtectSystem=strict alone
+# makes the host read-ONLY, not invisible — the contained claude could still READ
+# world-readable /etc, /usr, and (worse) sibling clones under clones/. Instead we
+# mount a fresh empty read-only root (TemporaryFileSystem=/:ro) and bind back IN
+# only what claude needs to run + read:
+#   - the clone itself (read-only)
+#   - claude's own config/home/run-tmp (read-write — its OAuth token + scratch)
+#   - the runtime essentials: the claude binary tree, node, shared libs, certs,
+#     DNS resolver config (all read-only)
+# Everything else — /home/nick, other clones, the rest of /etc — is simply NOT
+# mounted, so it does not exist inside the cage. Because the empty tmpfs root
+# masks the whole filesystem and we bind back ONLY the single validated clone
+# (never its parent clones/ dir), SIBLING runs under clones/ are absent by
+# construction — there is nothing to enumerate. No InaccessiblePaths masking is
+# needed (and adding one for the clones root would conflict with the clone bind).
+#
+# The static bound paths cover a stock RPi OS Bookworm aarch64 layout. The CLAUDE
+# tree binds are RESOLVED (install-time or fallback above), not hardcoded to a
+# single shim file (round-2 HIGH 2). install-reader-sandbox.sh validates the
+# claude tree at install time, and the on-Pi checklist (ops/reader-sandbox.md)
+# verifies claude actually STARTS and returns a non-null finding inside the cage.
+# If a path is absent on a given host, the on-Pi run fails LOUDLY (claude won't
+# start) rather than silently widening the cage.
+#
+# ── stage-reader's OWN Max-plan OAuth token (sandbox auth) ────────────────────
+# claude inside the cage authenticates via CLAUDE_CODE_OAUTH_TOKEN — the Max-plan
+# OAuth token minted by `claude setup-token` as stage-reader. `setup-token` does
+# NOT leave a config-dir login state that `claude -p` honors on its own (it
+# reports "Not logged in · Please run /login"), and reader.js deliberately passes
+# NO token through sudo (sudo strips env), so the token MUST be injected into the
+# cage env HERE. We (root) read it from stage-reader's OWN 0600 file; it never
+# transits nick's process or the sudo env. This is the Max-plan token (zero
+# marginal cost), NOT the metered ANTHROPIC_API_KEY (which reader.js hard-refuses).
+# We PARSE the file (sed), never `source` it — a malicious value can at worst be a
+# bogus token (claude fails auth → null finding), never code execution. If the
+# token is absent/empty, claude runs unauthenticated and the reader gets a null
+# finding — on-Pi checklist item 5 catches that.
+READER_OAUTH_ENV="${READER_CONFIG}/.reader-oauth.env"
+READER_OAUTH_TOKEN=''
+if [ -r "$READER_OAUTH_ENV" ]; then
+  READER_OAUTH_TOKEN="$(sed -n 's/^[[:space:]]*CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*//p' "$READER_OAUTH_ENV" | tail -n1)"
+  READER_OAUTH_TOKEN="${READER_OAUTH_TOKEN%\"}"; READER_OAUTH_TOKEN="${READER_OAUTH_TOKEN#\"}"
+fi
+
+# Built as an ARRAY so the dynamic CLAUDE_BINDS (the resolved claude install
+# tree + node) can be appended without a fragile backslash-continued literal.
+ARGS=(
+  --uid="$READER_USER"
+  --gid="$READER_GROUP"
+  --unit="$UNIT"
+  --wait
+  --pipe
+  --collect
+  --quiet
+  --working-directory="$REAL_CLONE"
+  --property=KillMode=mixed
+  --property=TimeoutStopSec=5
+  --setenv=HOME="$READER_HOME"
+  --setenv=CLAUDE_CONFIG_DIR="$READER_CONFIG"
+  --setenv=PATH="/usr/local/bin:/usr/bin:/bin"
+  --setenv=TMPDIR="$READER_RUNTMP"
+  --property=NoNewPrivileges=yes
+  --property=PrivateTmp=yes
+  --property=PrivateDevices=yes
+  --property=TemporaryFileSystem=/:ro
+  --property=BindReadOnlyPaths="$REAL_CLONE"
+  --property=BindReadOnlyPaths=/usr/bin
+  --property=BindReadOnlyPaths=/bin
+  --property=BindReadOnlyPaths=/usr/lib
+  --property=BindReadOnlyPaths=/lib
+  --property=BindReadOnlyPaths=-/usr/local/bin
+  --property=BindReadOnlyPaths=-/usr/local/lib
+  --property=BindReadOnlyPaths=-/lib64
+  --property=BindReadOnlyPaths=-/usr/local/sbin
+  --property=BindReadOnlyPaths=-/etc/ssl
+  --property=BindReadOnlyPaths=-/etc/ca-certificates
+  --property=BindReadOnlyPaths=-/usr/share/ca-certificates
+  --property=BindReadOnlyPaths=-/etc/resolv.conf
+  --property=BindReadOnlyPaths=-/etc/nsswitch.conf
+  --property=BindReadOnlyPaths=-/etc/hosts
+  --property=BindReadOnlyPaths=-/etc/passwd
+)
+# The resolved claude install tree + node runtime (round-2 HIGH 2). Each entry is
+# bound read-only; `-` prefix makes a missing one non-fatal (the binary's own bind
+# is the load-bearing one and the prereq check above asserts CLAUDE_BIN exists).
+# The ${#...} guard keeps an EMPTY array safe under `set -u` on older bash (the
+# Pi's bash 5 is fine; this stays portable).
+if [ "${#CLAUDE_BINDS[@]}" -gt 0 ]; then
+  for b in "${CLAUDE_BINDS[@]}"; do
+    [ -n "$b" ] && ARGS+=(--property=BindReadOnlyPaths=-"$b")
+  done
+fi
+# Inject the Max-plan OAuth token into the cage env (sandbox auth, see above).
+[ -n "$READER_OAUTH_TOKEN" ] && ARGS+=(--setenv=CLAUDE_CODE_OAUTH_TOKEN="$READER_OAUTH_TOKEN")
+ARGS+=(
+  --property=BindPaths="$READER_HOME"
+  --property=BindPaths="$READER_CONFIG"
+  --property=BindPaths="$READER_RUNTMP"
+  --property=ProtectProc=invisible
+  --property=ProcSubset=pid
+  --property=ProtectKernelTunables=yes
+  --property=ProtectKernelModules=yes
+  --property=ProtectKernelLogs=yes
+  --property=ProtectClock=yes
+  --property=ProtectControlGroups=yes
+  --property=ProtectHostname=yes
+  --property=RestrictNamespaces=yes
+  --property=RestrictRealtime=yes
+  --property=RestrictSUIDSGID=yes
+  --property=LockPersonality=yes
+  --property=RemoveIPC=yes
+  --property=RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX"
+  --property=SystemCallArchitectures=native
+  --property=SystemCallFilter=@system-service
+  # NOTE: @resources is intentionally NOT in this denylist. claude is a
+  # bun-compiled binary that calls sched_setscheduler (syscall 119 on arm64) at
+  # startup for its thread pool; denying @resources kills it with SIGSYS
+  # (status=31/SYS) the instant it execs — the "broken cage that never runs"
+  # failure (verified on-Pi 2026-06-18). @resources only lets a process tune its
+  # OWN scheduling/affinity/priority/memory-policy — no escape, privilege, write,
+  # or exfil vector — so allowing it (as @system-service already intends) is a
+  # safe loosening for a read-only, no-caps, egress-filtered workload.
+  --property=SystemCallFilter="~@privileged @mount @debug @reboot @swap @obsolete"
+  --property=CapabilityBoundingSet=
+  --property=AmbientCapabilities=
+  --property=UMask=0077
+  --
+  "$CLAUDE_BIN"
+    -p
+    --input-format text
+    --output-format json
+    --allowedTools Read,Grep,Glob
+    --disallowedTools Write,Edit,Bash,WebFetch,WebSearch
+    --permission-mode dontAsk
+)
+exec systemd-run "${ARGS[@]}"
