@@ -53,9 +53,11 @@ function resolveReportConsent(report) {
 
 // Project ONE archived report into its recap shape, applying the consent gate.
 // When consent is confirmed the full body is surfaced; otherwise a redacted
-// tombstone (id + kind + timestamps only — no spoken words, no links) so the
-// recap can honestly say "a report was given and later made private" without
-// leaking its content.
+// tombstone that retains only the participant's PUBLIC display label (the room
+// name, never spoken material) plus the report kind and timestamps, and drops
+// the entire spoken body (transcript, insights, facilitation, derived links).
+// So the recap can honestly say "a report was given and later made private"
+// without leaking its content.
 function consentedReport(report) {
   const { id, consented } = resolveReportConsent(report);
   // Prefer the LIVE display name (a handle change should reflect); fall back to

@@ -1873,3 +1873,49 @@ test('m4: a withdrawn-consent report does NOT leak into the recap or export', as
   assert.ok(!html.includes(secret), 'withdrawn transcript absent from the HTML export');
   assert.match(html, /made private/i, 'export shows a privacy tombstone instead of the content');
 });
+
+// ---------------------------------------------------------------------------
+// M4-3 (THE HEADLINE MILESTONE PATH): "closing an event creates a reviewable
+// recap." The other M4 tests recap the OPEN event (no-id -> live branch); this
+// exercises the resolveRecapEvent(id) ARCHIVED branch — recap a CLOSED event by
+// its id, proving reports[] survive the close and the archived-id lookup works.
+// ---------------------------------------------------------------------------
+test('m4: closing an event leaves a reviewable recap retrievable by archived id', async () => {
+  const opened = await openEvent('M4 Closed Recap');
+  const eventId = opened.body.event.id;
+  const guest = (await join()).body;
+  await setConsent(guest.token, { recording: true, research: false, title: 'Closed Widget' });
+
+  // Drive a full consented spotlight so a report archives for this event.
+  await post('/api/spotlight/start', { token: guest.token, kind: 'introduction' });
+  const transcript = 'We presented the closed-event widget before the event ended.';
+  await post('/api/spotlight/transcript', { token: guest.token, transcript, isFinal: true });
+  await post('/api/spotlight/end', { token: guest.token });
+
+  // CLOSE the event — the milestone trigger ("closing creates a recap").
+  const closed = await post('/api/event/close');
+  assert.equal(closed.status, 200, 'event closes');
+  assert.equal(closed.body.event.status, 'closed', 'event is now closed');
+
+  // The room is now closed; recap MUST be retrievable by the archived event id
+  // (the resolveRecapEvent archived branch, previously untested).
+  const recapRes = await get(`/api/event/recap?id=${eventId}`);
+  assert.equal(recapRes.status, 200, 'recap of a closed event returns 200 by archived id');
+  const recap = recapRes.body.recap;
+  assert.equal(recap.event.id, eventId, 'recap is for the closed event');
+  assert.equal(recap.event.status, 'closed', 'recap reflects the closed status');
+
+  // reports[] survive the close: the consented report still surfaces in full.
+  assert.equal(recap.reports.length, 1, 'the archived report survives the event close');
+  const r = recap.reports[0];
+  assert.equal(r.redacted, false, 'report is not redacted (consent still stands)');
+  assert.equal(r.transcript, transcript, 'archived report still carries its transcript');
+  assert.equal(recap.summary.consentedReportCount, 1, 'summary counts the surviving report');
+
+  // The HTML export for the archived id is self-contained text/html with the title.
+  const htmlRes = await fetch(BASE + `/api/event/recap.html?id=${eventId}`);
+  assert.equal(htmlRes.status, 200, 'recap.html for a closed event returns 200');
+  assert.match(htmlRes.headers.get('content-type') || '', /text\/html/, 'recap.html is text/html');
+  const htmlText = await htmlRes.text();
+  assert.match(htmlText, /M4 Closed Recap/, 'HTML export of the closed event contains the title');
+});
