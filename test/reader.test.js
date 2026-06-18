@@ -422,3 +422,182 @@ test('runReader: concurrency 1 — a second concurrent call declines with {findi
     fake.restore();
   }
 });
+
+// ── Slice 8: the OS-sandbox spawn-path selection (STAGE_READER_SANDBOX) ───────
+// buildSpawn is the pure selector between DIRECT (spawn claude as-is) and
+// SANDBOX (spawn `sudo <wrapper> <cloneDir> -- claude ...`). We pin the argv
+// shape + env minimalism in both modes WITHOUT a live spawn.
+
+test('buildSpawn: DIRECT mode (flag unset) spawns claude with cwd + childEnv', () => {
+  const saved = process.env.STAGE_READER_SANDBOX;
+  delete process.env.STAGE_READER_SANDBOX;
+  process.env.STAGE_READER_CLAUDE_BIN = '/opt/claude';
+  try {
+    const childEnv = { HOME: '/h', PATH: '/bin' };
+    const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', childEnv);
+    assert.equal(s.command, '/opt/claude');
+    assert.equal(s.unit, null);
+    assert.equal(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/clone');
+    assert.deepEqual(s.spawnOpts.env, childEnv);
+    // The read-only tool restrictions are present.
+    assert.ok(s.args.includes('--allowedTools'));
+    assert.ok(s.args.includes('--disallowedTools'));
+    assert.ok(!s.args.includes('--bare'), 'never --bare (would prefer the API key)');
+  } finally {
+    delete process.env.STAGE_READER_CLAUDE_BIN;
+    if (saved === undefined) delete process.env.STAGE_READER_SANDBOX;
+    else process.env.STAGE_READER_SANDBOX = saved;
+  }
+});
+
+test('buildSpawn: SANDBOX mode routes through `sudo -n <wrapper> <cloneDir> -- claude ...`', () => {
+  const savedFlag = process.env.STAGE_READER_SANDBOX;
+  const savedWrap = process.env.STAGE_READER_WRAPPER;
+  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
+  const savedBin = process.env.STAGE_READER_CLAUDE_BIN;
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  process.env.STAGE_READER_SANDBOX = '1';
+  process.env.STAGE_READER_WRAPPER = '/usr/local/sbin/stage-reader-run';
+  process.env.STAGE_READER_SUDO_BIN = 'sudo';
+  process.env.STAGE_READER_CLAUDE_BIN = 'claude';
+  try {
+    const cloneDir = '/var/lib/stage-reader/clones/run42/clone';
+    const s = reader.buildSpawn(cloneDir, { HOME: '/nick/scratch', CLAUDE_CODE_OAUTH_TOKEN: 'nick-secret' });
+    assert.equal(s.command, 'sudo');
+    // sudo -n (non-interactive), then the wrapper, the clone dir, the -- sep,
+    // then the claude argv.
+    assert.equal(s.args[0], '-n');
+    assert.equal(s.args[1], '/usr/local/sbin/stage-reader-run');
+    assert.equal(s.args[2], cloneDir);
+    assert.equal(s.args[3], '--');
+    assert.equal(s.args[4], 'claude');
+    assert.ok(s.args.includes('--allowedTools'), 'claude tool restrictions still passed verbatim');
+    // The transient unit name is deterministic off the clone basename.
+    assert.equal(s.unit, 'stage-reader-clone');
+    // Critically: nick's childEnv / OAuth token is NOT handed to sudo. Only a
+    // minimal PATH rides along, and NEVER an API key.
+    assert.deepEqual(Object.keys(s.spawnOpts.env), ['PATH']);
+    assert.equal('CLAUDE_CODE_OAUTH_TOKEN' in s.spawnOpts.env, false, 'no token through sudo');
+    assert.equal('ANTHROPIC_API_KEY' in s.spawnOpts.env, false);
+    assert.equal(s.spawnOpts.cwd, undefined, 'cwd set inside the cage by the wrapper, not by sudo');
+  } finally {
+    for (const [k, v] of [
+      ['STAGE_READER_SANDBOX', savedFlag],
+      ['STAGE_READER_WRAPPER', savedWrap],
+      ['STAGE_READER_SUDO_BIN', savedSudo],
+      ['STAGE_READER_CLAUDE_BIN', savedBin],
+      ['ANTHROPIC_API_KEY', savedKey],
+    ]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
+
+test('runReader: SANDBOX mode invokes the wrapper via a FAKE sudo and parses its finding', async () => {
+  // End-to-end through runReader with STAGE_READER_SANDBOX=1, a FAKE `sudo` that
+  // stands in for the whole sudo→wrapper→systemd-run→claude chain: it just
+  // verifies it was called as `sudo -n <wrapper> <cloneDir> -- claude ...` and
+  // emits the claude JSON envelope. This proves the production code path SELECTS
+  // and SHAPES the sandboxed invocation correctly (the real OS confinement is an
+  // on-Pi gate, per ops/reader-sandbox.md — CI cannot sudo).
+  const result = {
+    finding: 'sandboxed read still produces a finding',
+    evidence: [{ path: 'server.js', why: 'real file in the fixture' }],
+    question: 'Deliberate?',
+    confidence: 'high',
+    kind: 'eerie-read',
+  };
+  const envelope = JSON.stringify({ result: JSON.stringify(result) });
+  // No token file needed in sandbox mode — runReader skips the nick-side token.
+  const fake = withFakeEnv('#!/bin/sh\necho "fake claude should not be called directly in sandbox mode" >&2\nexit 99\n');
+  // Fake sudo: assert the argv shape, then emit the envelope as if claude ran.
+  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
+  fs.writeFileSync(
+    fakeSudo,
+    '#!/bin/sh\n' +
+    '# expected: sudo -n <wrapper> <cloneDir> -- claude ...\n' +
+    '[ "$1" = "-n" ] || { echo "missing -n" >&2; exit 2; }\n' +
+    'case "$2" in */stage-reader-run) : ;; *) echo "bad wrapper: $2" >&2; exit 2 ;; esac\n' +
+    'case "$3" in */clone) : ;; *) echo "bad clonedir: $3" >&2; exit 2 ;; esac\n' +
+    '[ "$4" = "--" ] || { echo "missing --" >&2; exit 2; }\n' +
+    'cat <<\'EOF\'\n' + envelope + '\nEOF\n',
+    { mode: 0o755 },
+  );
+  const savedFlag = process.env.STAGE_READER_SANDBOX;
+  const savedWrap = process.env.STAGE_READER_WRAPPER;
+  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
+  process.env.STAGE_READER_SANDBOX = '1';
+  process.env.STAGE_READER_WRAPPER = '/usr/local/sbin/stage-reader-run';
+  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
+  try {
+    const out = await reader.runReader({ handle: 'simonw', repo: 'datasette', spotlightId: 'sb1' });
+    assert.equal(out.kind, 'eerie-read', 'sandbox path produced the finding');
+    assert.equal(out.finding, result.finding);
+    assert.equal(leftoverRunDirs(fake.scratch), 0, 'scratch wiped on the sandbox path too');
+  } finally {
+    for (const [k, v] of [
+      ['STAGE_READER_SANDBOX', savedFlag],
+      ['STAGE_READER_WRAPPER', savedWrap],
+      ['STAGE_READER_SUDO_BIN', savedSudo],
+    ]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fake.restore();
+  }
+});
+
+test('runReader: SANDBOX mode does NOT require nick-side OAuth token (stage-reader owns auth)', async () => {
+  const result = { finding: 'x', evidence: [{ path: 'server.js', why: 'y' }], confidence: 'high', kind: 'eerie-read' };
+  const envelope = JSON.stringify({ result: JSON.stringify(result) });
+  const fake = withFakeEnv('#!/bin/sh\nexit 99\n');
+  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
+  fs.writeFileSync(fakeSudo, '#!/bin/sh\ncat <<\'EOF\'\n' + envelope + '\nEOF\n', { mode: 0o755 });
+  const savedFlag = process.env.STAGE_READER_SANDBOX;
+  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
+  process.env.STAGE_READER_SANDBOX = '1';
+  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
+  // Point the token file at a NON-EXISTENT path: in direct mode this aborts, but
+  // sandbox mode must not require it.
+  process.env.STAGE_READER_TOKEN_FILE = path.join(fake.sandbox, 'no-such-token.env');
+  try {
+    const out = await reader.runReader({ handle: 'simonw', repo: 'datasette', spotlightId: 'sb2' });
+    assert.equal(out.kind, 'eerie-read', 'sandbox run succeeds without nick-side token');
+  } finally {
+    for (const [k, v] of [
+      ['STAGE_READER_SANDBOX', savedFlag],
+      ['STAGE_READER_SUDO_BIN', savedSudo],
+    ]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fake.restore();
+  }
+});
+
+test('runReader: SANDBOX mode STILL hard-aborts on ANTHROPIC_API_KEY (cost safety survives)', async () => {
+  const fake = withFakeEnv('#!/bin/sh\nexit 99\n');
+  const fakeSudo = path.join(fake.sandbox, 'bin', 'sudo');
+  fs.writeFileSync(fakeSudo, '#!/bin/sh\necho "{}"\n', { mode: 0o755 });
+  const savedFlag = process.env.STAGE_READER_SANDBOX;
+  const savedSudo = process.env.STAGE_READER_SUDO_BIN;
+  process.env.STAGE_READER_SANDBOX = '1';
+  process.env.STAGE_READER_SUDO_BIN = fakeSudo;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-leak';
+  try {
+    await assert.rejects(
+      () => reader.runReader({ handle: 'simonw', repo: 'datasette', spotlightId: 'sb3' }),
+      /ANTHROPIC_API_KEY/,
+      'the cost-safety assertion is mode-independent',
+    );
+    assert.equal(leftoverRunDirs(fake.scratch), 0, 'wiped even on the sandbox cost-abort');
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY;
+    for (const [k, v] of [
+      ['STAGE_READER_SANDBOX', savedFlag],
+      ['STAGE_READER_SUDO_BIN', savedSudo],
+    ]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fake.restore();
+  }
+});

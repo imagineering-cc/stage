@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+#
+# stage-reader-run — the ONLY thing nick is permitted to run as root (via a
+# NOPASSWD sudoers drop-in). It is the OS-confinement cage for The Reader
+# (reader.js): it drops privilege to the unprivileged `stage-reader` system user
+# and runs a FIXED, read-only `claude` invocation under a tight systemd
+# confinement property set, with cwd bound to an attacker-controllable clone.
+#
+# ── THE TRUST BOUNDARY IS THIS SCRIPT'S ARGUMENT VALIDATION ──────────────────
+# The sudoers rule is `nick ALL=(root) NOPASSWD: /usr/local/sbin/stage-reader-run *`.
+# The trailing `*` is broad on purpose — sudoers globbing cannot express "a path
+# under /var/lib/stage-reader with no .. and no symlink escape". So the REAL gate
+# is the validation below, which this script performs as root BEFORE it execs
+# anything. If you weaken the validation, you weaken the whole cage. Treat every
+# argument as hostile (the clone dir name is derived from a participant-asserted
+# spotlight id / random bytes; reader.js sanitises it, but we re-validate here —
+# defence in depth, and this script must be safe even if called directly).
+#
+# Usage (exactly): stage-reader-run <cloneDir> -- <claude args...>
+#   <cloneDir>  absolute path that MUST resolve (realpath) under SCRATCH_ROOT and
+#               be an existing directory. No `..`, no symlink escape.
+#   --          literal separator.
+#   <claude args...>  the read-only claude invocation reader.js built. We do NOT
+#               re-interpret them; they are passed verbatim as the unit's argv.
+#               (claude itself enforces --allowedTools/--disallowedTools; the OS
+#               cage here is orthogonal containment of the PROCESS.)
+#
+# Run by: reader.js → `sudo /usr/local/sbin/stage-reader-run <cloneDir> -- claude ...`
+# Installed by: ops/install-reader-sandbox.sh (root-owned, mode 0755, NOT writable
+# by nick — so nick cannot edit the very thing he's trusted to run as root).
+#
+set -euo pipefail
+
+# ── fixed configuration (NOT taken from the environment; this runs as root) ───
+# The scratch root that clone dirs MUST live under. Keep in lock-step with
+# reader.js scratchRoot() default and ops/install-reader-sandbox.sh.
+SCRATCH_ROOT='/var/lib/stage-reader'
+READER_USER='stage-reader'
+READER_GROUP='stage-reader'
+# stage-reader's OWN claude config/home (separate OAuth token, mode 0600), and a
+# writable run-tmp. Both are the ONLY writable paths the cage permits.
+READER_HOME="${SCRATCH_ROOT}/home"
+READER_CONFIG="${SCRATCH_ROOT}/claude-config"
+READER_RUNTMP="${SCRATCH_ROOT}/run-tmp"
+
+die() { printf 'stage-reader-run: %s\n' "$1" >&2; exit 64; }
+
+# ── 1. argument shape ─────────────────────────────────────────────────────────
+[ "$#" -ge 3 ] || die "usage: stage-reader-run <cloneDir> -- <claude args...>"
+CLONE_DIR="$1"; shift
+[ "$1" = '--' ] || die "second argument must be the literal -- separator"
+shift
+# Remaining args ("$@") are the claude argv. Require at least the binary.
+[ "$#" -ge 1 ] || die "no claude command given after --"
+
+# ── 2. clone-dir containment (the gate) ───────────────────────────────────────
+# Must be an existing directory. Resolve symlinks with realpath -e (fails if any
+# component is missing), then require the resolved path to be strictly UNDER the
+# scratch root. realpath collapses `..` and follows symlinks, so a crafted
+# `..`/symlink path that escapes is caught here.
+case "$CLONE_DIR" in
+  /*) : ;;                       # must be absolute
+  *) die "clone dir must be an absolute path: $CLONE_DIR" ;;
+esac
+[ -d "$CLONE_DIR" ] || die "clone dir is not a directory: $CLONE_DIR"
+
+REAL_CLONE="$(realpath -e -- "$CLONE_DIR")" || die "clone dir does not resolve: $CLONE_DIR"
+REAL_ROOT="$(realpath -e -- "$SCRATCH_ROOT")" || die "scratch root missing: $SCRATCH_ROOT"
+
+# Strict containment: REAL_CLONE must be REAL_ROOT/<something>, never the root
+# itself and never outside it. The trailing-slash compare avoids the
+# /var/lib/stage-reader-evil prefix-collision bug.
+case "$REAL_CLONE/" in
+  "$REAL_ROOT"/*) : ;;
+  *) die "clone dir escapes scratch root ($REAL_CLONE not under $REAL_ROOT)" ;;
+esac
+# And it must not BE one of our reserved control dirs.
+for reserved in "$REAL_ROOT" "$READER_HOME" "$READER_CONFIG" "$READER_RUNTMP"; do
+  rr="$(realpath -m -- "$reserved")"
+  [ "$REAL_CLONE" = "$rr" ] && die "clone dir may not be a reserved control dir: $REAL_CLONE"
+done
+
+# ── 3. require the confinement prerequisites exist ────────────────────────────
+# These are laid down by install-reader-sandbox.sh. If they are missing we REFUSE
+# to run rather than silently run with a weaker cage.
+id -u "$READER_USER" >/dev/null 2>&1 || die "system user '$READER_USER' does not exist (run install-reader-sandbox.sh)"
+[ -d "$READER_CONFIG" ] || die "reader claude-config dir missing: $READER_CONFIG"
+[ -d "$READER_HOME" ] || die "reader home dir missing: $READER_HOME"
+[ -d "$READER_RUNTMP" ] || die "reader run-tmp missing: $READER_RUNTMP"
+
+# ── 4. exec the cage ──────────────────────────────────────────────────────────
+# We `exec` systemd-run so THIS process is REPLACED by systemd-run. That matters
+# for the kill path: reader.js spawns `sudo stage-reader-run ...`; sudo forwards
+# SIGTERM/SIGINT to its (now systemd-run) child; with `--wait`, systemd-run
+# reacts to a received SIGTERM by stopping the transient unit, which tears down
+# the contained `claude`. So a Node-side `child.kill('SIGTERM')` propagates all
+# the way to the workload — no orphaned claude inside a detached scope.
+#
+# A deterministic unit name keyed off the clone dir lets an operator (or
+# reader.js's SIGKILL fallback) target the unit directly with `systemctl stop`.
+UNIT="stage-reader-$(basename "$REAL_CLONE")"
+
+# The confinement property set (the cage). See ops/reader-sandbox.md for the full
+# rationale of each. NOTE: MemoryDenyWriteExecute is DELIBERATELY OMITTED — node
+# (and thus claude) JITs, and W^X memory would SIGSEGV the runtime. The seccomp
+# SystemCallFilter + NoNewPrivileges + namespace/filesystem confinement carry the
+# containment without it.
+exec systemd-run \
+  --uid="$READER_USER" \
+  --gid="$READER_GROUP" \
+  --unit="$UNIT" \
+  --wait \
+  --pipe \
+  --collect \
+  --quiet \
+  --working-directory="$REAL_CLONE" \
+  --property=KillMode=mixed \
+  --property=TimeoutStopSec=5 \
+  --setenv=HOME="$READER_HOME" \
+  --setenv=CLAUDE_CONFIG_DIR="$READER_CONFIG" \
+  --setenv=PATH="/usr/local/bin:/usr/bin:/bin" \
+  --setenv=TMPDIR="$READER_RUNTMP" \
+  --property=NoNewPrivileges=yes \
+  --property=PrivateTmp=yes \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=yes \
+  --property=ProtectProc=invisible \
+  --property=ProcSubset=pid \
+  --property=ProtectKernelTunables=yes \
+  --property=ProtectKernelModules=yes \
+  --property=ProtectKernelLogs=yes \
+  --property=ProtectClock=yes \
+  --property=ProtectControlGroups=yes \
+  --property=ProtectHostname=yes \
+  --property=RestrictNamespaces=yes \
+  --property=RestrictRealtime=yes \
+  --property=RestrictSUIDSGID=yes \
+  --property=LockPersonality=yes \
+  --property=RemoveIPC=yes \
+  --property=RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" \
+  --property=SystemCallArchitectures=native \
+  --property=SystemCallFilter=@system-service \
+  --property=SystemCallFilter="~@privileged @mount @debug @reboot @swap @obsolete @resources" \
+  --property=CapabilityBoundingSet= \
+  --property=AmbientCapabilities= \
+  --property=ReadOnlyPaths="$REAL_CLONE" \
+  --property=ReadWritePaths="$READER_HOME $READER_CONFIG $READER_RUNTMP" \
+  --property=UMask=0077 \
+  -- \
+  "$@"
