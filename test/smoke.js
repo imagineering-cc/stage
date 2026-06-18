@@ -403,6 +403,83 @@ test('visuals -> broadcast: a guest visual change fans out over SSE', async () =
 });
 
 // ---------------------------------------------------------------------------
+// M5: identity-keyed, rate-limited personal visual pulse.
+//   (a) IDENTITY: an accepted gesture carries THIS participant's assigned color
+//       (and a bounded `magnitude`) into the broadcast `visualEvent` — the pulse
+//       is visibly theirs, not a generic flash.
+//   (b) BOUND: a too-soon second pulse from the SAME token is rejected (429) so a
+//       guest can't continuously overwrite the shared room canvas. This is the M5
+//       "distinct variations without continuous overwriting" invariant, enforced
+//       SERVER-SIDE by the per-token GESTURE_COOLDOWN_MS cooldown in /api/gesture.
+// Runs on the shared server (default 4s cooldown); two back-to-back HTTP calls are
+// well inside the window, so the second is deterministically rejected.
+// ---------------------------------------------------------------------------
+test('m5 pulse: identity-keyed color reaches the wire; a too-soon second pulse is bounded', async () => {
+  await openEvent('Pulse Test');
+  const g = (await join()).body;
+
+  // (a) An accepted pulse carries the requester's identity into visualEvent.
+  const first = await post('/api/gesture', { token: g.token, type: 'shake', intensity: 0.8 });
+  assert.equal(first.status, 200, 'first pulse accepted');
+  assert.equal(first.body.visualEvent.color, g.color, 'pulse carries the requester assigned color');
+  assert.equal(first.body.visualEvent.requesterName, g.name, 'pulse carries the requester name');
+  assert.equal(first.body.visualEvent.magnitude, 0.8, 'pulse carries a bounded server-clamped magnitude');
+
+  // The identity-keyed pulse must reach the PUBLIC SSE wire (visualEvent field).
+  const snap = await sseSnapshot('/api/events');
+  assert.equal(snap.visualEvent.color, g.color, 'broadcast visualEvent is keyed to the requester color');
+  assert.equal(snap.visualEvent.magnitude, 0.8, 'broadcast visualEvent carries the bounded magnitude');
+
+  // (b) BOUND: a second pulse from the same token, inside the cooldown, is rejected.
+  const second = await post('/api/gesture', { token: g.token, type: 'shake', intensity: 0.5 });
+  assert.equal(second.status, 429, 'a too-soon second pulse is rejected (bounded, not continuous)');
+  assert.ok(second.body.retryAfterMs > 0, '429 surfaces a positive retryAfterMs so a frontend can wait');
+
+  // A DIFFERENT participant is NOT throttled by someone else's pulse (per-token).
+  const g2 = (await join()).body;
+  const other = await post('/api/gesture', { token: g2.token, type: 'shake', intensity: 0.4 });
+  assert.equal(other.status, 200, 'the cooldown is per-token: a different guest can still pulse');
+  assert.equal(other.body.visualEvent.color, g2.color, 'the second guest pulse is keyed to ITS color');
+});
+
+// ---------------------------------------------------------------------------
+// M5: the per-token bound RELEASES after the cooldown window. Boots a dedicated
+// server with a tiny GESTURE_COOLDOWN_MS so we can prove the same token is
+// accepted again once the window elapses — without a multi-second sleep on the
+// shared server. Pins the bound as a real cooldown, not a permanent block.
+// ---------------------------------------------------------------------------
+test('m5 pulse: the per-token cooldown releases after its window', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-pulse-'));
+  const sf = path.join(dir, 'state.json');
+  let boot;
+  try {
+    boot = await bootOnce(sf, { env: { STAGE_GESTURE_COOLDOWN_MS: '300' } });
+    const base = `http://127.0.0.1:${boot.port}`;
+    const j = async (p, body) => {
+      const r = await fetch(base + p, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: r.status, body: await r.json().catch(() => ({})) };
+    };
+    await j('/api/event/open', { title: 'Pulse Window' });
+    const g = (await j('/api/join')).body;
+
+    const a = await j('/api/gesture', { token: g.token, type: 'shake', intensity: 0.6 });
+    assert.equal(a.status, 200, 'first pulse accepted');
+    const tooSoon = await j('/api/gesture', { token: g.token, type: 'shake', intensity: 0.6 });
+    assert.equal(tooSoon.status, 429, 'within the 300ms window: bounded');
+
+    await new Promise((r) => setTimeout(r, 400)); // > cooldown
+    const afterWindow = await j('/api/gesture', { token: g.token, type: 'shake', intensity: 0.6 });
+    assert.equal(afterWindow.status, 200, 'after the window the same token may pulse again (cooldown, not a permanent block)');
+  } finally {
+    if (boot) boot.child.kill('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 10 (placed here so the round-trip uses the SHARED server child): every save
 // the suite triggered round-trips — what we persisted parses AND passes the
 // validator's own gate. The fsync calls in savePersistentState are exercised by
@@ -429,11 +506,11 @@ let bootPort = PORT + 1; // distinct port per short-lived child to avoid collisi
 
 // Spawn server.js against a specific state file. With expectExit:false (default)
 // it resolves once /api/config answers; otherwise it resolves on process exit.
-function bootOnce(stateFilePath, { expectExit = false } = {}) {
+function bootOnce(stateFilePath, { expectExit = false, env = {} } = {}) {
   return new Promise((resolve, reject) => {
     const myPort = bootPort++;
     const c = spawn(process.execPath, [SERVER], {
-      env: { ...process.env, STAGE_NO_AUDIO: '1', PORT: String(myPort), STAGE_STATE_FILE: stateFilePath },
+      env: { ...process.env, STAGE_NO_AUDIO: '1', PORT: String(myPort), STAGE_STATE_FILE: stateFilePath, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
