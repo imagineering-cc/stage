@@ -50,6 +50,11 @@
 # reachable, and it would mis-fire on the common race where the unit is already
 # gone (stop/kill of a vanished unit is a harmless no-op we still want to attempt).
 #
+# OPERATIONAL RESERVATION: `stage-reader-*` is a RESERVED systemd unit namespace.
+# Do NOT create non-reader system units (`.service`/`.socket`/etc.) with that
+# prefix — this helper will stop+kill anything matching it. Today only reader.js's
+# transient cage units occupy it; keep it that way.
+#
 # Run by: reader.js → `sudo -n /usr/local/sbin/stage-reader-reap <unit>` on the
 #         read-timeout path (best-effort; errors are swallowed by the caller).
 # Installed by: ops/install-reader-sandbox.sh (root-owned, mode 0755, NOT writable
@@ -87,6 +92,10 @@ done
 # ── 4. the fixed action: stop (graceful) then kill (hard), this ONE unit only ──
 # Best-effort: a unit that is already gone makes these no-ops. We swallow errors
 # here too so a vanished unit yields exit 0 (the reaper is a backstop, not a gate).
+# `systemctl kill` defaults to SIGTERM (KillSignal); we pass --signal=SIGKILL
+# explicitly (round-4 review, Carnot) so this is the genuine HARD kill the caller
+# wants as the last-resort teardown — `stop` above already does the graceful path
+# (KillMode=mixed, TimeoutStopSec=5 escalating to SIGKILL).
 "$SYSTEMCTL" stop "$UNIT" 2>/dev/null || true
-"$SYSTEMCTL" kill "$UNIT" 2>/dev/null || true
+"$SYSTEMCTL" kill --signal=SIGKILL "$UNIT" 2>/dev/null || true
 exit 0

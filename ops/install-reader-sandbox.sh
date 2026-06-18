@@ -45,6 +45,23 @@ BINDS_CONF="${BINDS_CONF_DIR}/binds.conf"
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
+# nearest-parent versions/<ver> dir (round-4 review, Carnot): the ancestor of the
+# resolved claude binary whose PARENT dir is literally named "versions" (NEAREST to
+# the binary — NOT the first `/versions/` occurrence, which `${x%%/versions/*}`
+# would wrongly pick for a path containing `versions` more than once, binding an
+# over-broad subtree). Falls back to the binary's own dir when there is no such
+# ancestor. MUST match the wrapper's claude_version_dir (ops/stage-reader-run).
+claude_version_dir() {
+  local d; d="$(dirname -- "$1")"
+  while [[ "$d" != "/" && "$d" != "." && -n "$d" ]]; do
+    if [[ "$(basename -- "$(dirname -- "$d")")" == "versions" ]]; then
+      printf '%s' "$d"; return 0
+    fi
+    d="$(dirname -- "$d")"
+  done
+  dirname -- "$1"
+}
+
 if [[ "${EUID}" -eq 0 ]]; then
   printf 'Run this as your normal user (nick), not root; it sudo-escalates per step.\n' >&2
   exit 1
@@ -120,15 +137,9 @@ else
   # MED (round-3): bind ONLY the resolved versions/<ver>/ subtree, NOT the whole
   # ~/.local/share/claude tree. The caged (attacker-influenced) claude can
   # Read/Grep/Glob anything bound in, so we narrow it to exactly the version
-  # directory needed to execute. Extract `.../versions/<ver>` from the resolved
-  # binary path; if the layout isn't versioned, fall back to the binary's own dir.
-  case "${CLAUDE_REAL}" in
-    */versions/*)
-      _ver_rest="${CLAUDE_REAL#*/versions/}"                       # <ver>/.../claude
-      CLAUDE_VER_DIR="${CLAUDE_REAL%%/versions/*}/versions/${_ver_rest%%/*}"
-      ;;
-    *) CLAUDE_VER_DIR="${CLAUDE_REAL_DIR}" ;;
-  esac
+  # directory needed to execute. NEAREST-parent versions dir (round-4, Carnot) —
+  # not the first `/versions/` occurrence.
+  CLAUDE_VER_DIR="$(claude_version_dir "${CLAUDE_REAL}")"
   printf 'claude version dir (bound): %s\n' "${CLAUDE_VER_DIR}"
   # Bind set: the shim path, the resolved binary, the resolved binary's own dir,
   # and the versions/<ver> subtree (covers the JS bundle + bundled node). We do

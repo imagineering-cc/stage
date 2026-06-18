@@ -268,6 +268,23 @@ regardless.
 > unit and stale units piled up. reader.js (`basename(dirname(cloneDir))`) and the
 > wrapper (`basename "$(dirname REAL_CLONE)"`, sanitised to the unit charset)
 > compute the **same** name, verified byte-for-byte by a unit test.
+>
+> **round-4 review (Carnot) — three hardenings on the round-3 fix:**
+> - **binds.conf integrity guard.** The wrapper sources `/etc/stage-reader/binds.conf`
+>   AS ROOT, which makes it root *code* behind the NOPASSWD grant. The wrapper now
+>   VERIFIES it before sourcing (`binds_conf_trusted`): not a symlink, a regular
+>   file, owned by uid 0, not group/other-writable, and its parent dir likewise.
+>   Any failure (incl. a `stat` that can't read it) is **fail-closed** — the file
+>   is ignored and the self-contained fallback resolution runs (sourcing nothing).
+> - **Nearest-parent versions dir.** Both the installer and the wrapper fallback now
+>   pick the versions dir by walking UP from the resolved binary to the ancestor
+>   whose parent is named `versions`, NOT the first `/versions/` substring (which
+>   `${x%%/versions/*}` would mis-pick for a path containing `versions` twice,
+>   binding an over-broad subtree). `claude_version_dir` is identical in both files.
+> - **Hard kill + reserved namespace.** `stage-reader-reap` passes
+>   `--signal=SIGKILL` to `systemctl kill` (its default is SIGTERM) so the
+>   last-resort teardown is genuinely hard. And `stage-reader-*` is a **reserved**
+>   systemd unit namespace — never create non-reader system units with that prefix.
 
 ---
 
@@ -308,8 +325,11 @@ sudo install -d -o stage-reader -g stage-reader -m 0700 /var/lib/stage-reader/ru
 #    bind the resolved tree, not just the shim, or claude won't load in the cage.
 #    round-3 MED: bind ONLY the versions/<ver>/ subtree, NOT the whole
 #    ~/.local/share/claude tree (the caged claude can Read/Grep whatever is bound).
+#    round-4 (Carnot): use the NEAREST-parent versions dir (walk up from the
+#    binary to the ancestor whose parent is named "versions"), NOT the first
+#    /versions/ occurrence — a path with `versions` twice would bind too broadly.
 LINK="$(command -v claude)"; REAL="$(readlink -f "$LINK")"
-case "$REAL" in */versions/*) VER="${REAL%%/versions/*}/versions/$(x="${REAL#*/versions/}"; printf '%s' "${x%%/*}")";; *) VER="$(dirname "$REAL")";; esac
+VER="$(d="$(dirname "$REAL")"; while [ "$d" != / ] && [ -n "$d" ] && [ "$(basename "$(dirname "$d")")" != versions ]; do d="$(dirname "$d")"; done; { [ "$d" = / ] || [ -z "$d" ]; } && dirname "$REAL" || printf '%s' "$d")"
 sudo install -d -o root -g root -m 0755 /etc/stage-reader
 printf 'CLAUDE_BIN=%q\nCLAUDE_BINDS=( %q %q %q %q )\n' \
   "$LINK" "$LINK" "$REAL" "$(dirname "$REAL")" "$VER" \

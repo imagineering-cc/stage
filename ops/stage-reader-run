@@ -60,6 +60,47 @@ READER_RUNTMP="${SCRATCH_ROOT}/run-tmp"
 
 die() { printf 'stage-reader-run: %s\n' "$1" >&2; exit 64; }
 
+# ── binds.conf integrity guard (round-4 review, Carnot) ───────────────────────
+# We are about to `.` (source) binds.conf AS ROOT — that makes it root CODE behind
+# the NOPASSWD grant. The installer writes it root:root 0644, but TRUSTING that at
+# runtime is the bug; we VERIFY it. Returns 0 only if the file is: not a symlink, a
+# regular file, owned by uid 0, NOT group/other-writable, AND its parent dir is
+# likewise root-owned and not group/other-writable (so it can't be swapped under
+# us). Any stat failure (e.g. BSD stat lacking -c) → return 1 = fail-closed, and the
+# caller falls through to the self-contained fallback resolution (which sources
+# NOTHING). Fail-closed: an unverifiable binds.conf is never executed.
+binds_conf_trusted() {
+  local f="$1" d perm g o
+  [ ! -L "$f" ] && [ -f "$f" ] || return 1
+  d="$(dirname -- "$f")"
+  [ "$(stat -c '%u' -- "$f" 2>/dev/null)" = "0" ] || return 1
+  [ "$(stat -c '%u' -- "$d" 2>/dev/null)" = "0" ] || return 1
+  for p in "$f" "$d"; do
+    perm="$(stat -c '%a' -- "$p" 2>/dev/null)" || return 1
+    g="${perm: -2:1}"; o="${perm: -1}"          # group + other octal digits
+    case "$g" in 2|3|6|7) return 1 ;; esac       # group-writable → reject
+    case "$o" in 2|3|6|7) return 1 ;; esac       # other-writable → reject
+  done
+  return 0
+}
+
+# ── nearest-parent versions/<ver> dir (round-4 review, Carnot) ────────────────
+# Given the resolved claude binary path, return the ancestor whose PARENT dir is
+# literally named "versions" (NEAREST to the binary — NOT the first `/versions/`
+# occurrence, which `${x%%/versions/*}` would wrongly pick for a path that contains
+# `versions` more than once, binding an over-broad subtree). Falls back to the
+# binary's own dir when there is no `versions` ancestor.
+claude_version_dir() {
+  local d; d="$(dirname -- "$1")"
+  while [ "$d" != "/" ] && [ "$d" != "." ] && [ -n "$d" ]; do
+    if [ "$(basename -- "$(dirname -- "$d")")" = "versions" ]; then
+      printf '%s' "$d"; return 0
+    fi
+    d="$(dirname -- "$d")"
+  done
+  dirname -- "$1"
+}
+
 # ── claude binary + its install tree (cage-match round-2 HIGH 2) ──────────────
 # A real `claude` install is a SHIM: ~/.local/bin/claude is a SYMLINK into
 # ~/.local/share/claude/versions/<ver>/... — binding only the shim file leaves
@@ -75,8 +116,12 @@ BINDS_CONF='/etc/stage-reader/binds.conf'
 CLAUDE_BIN=''
 CLAUDE_BINDS=()   # absolute dirs/files to BindReadOnlyPaths (the claude tree + node)
 if [ -r "$BINDS_CONF" ]; then
-  # shellcheck source=/dev/null
-  . "$BINDS_CONF"   # sets CLAUDE_BIN and CLAUDE_BINDS=(...)
+  if binds_conf_trusted "$BINDS_CONF"; then
+    # shellcheck source=/dev/null
+    . "$BINDS_CONF"   # sets CLAUDE_BIN and CLAUDE_BINDS=(...)
+  else
+    printf 'stage-reader-run: %s failed its integrity check (not a root-owned, non-writable regular file); IGNORING it and using fallback resolution\n' "$BINDS_CONF" >&2
+  fi
 fi
 # Fallback resolution if the install config is absent (e.g. hand-run before the
 # installer wrote it): resolve the symlink ourselves and bind its install root.
@@ -91,12 +136,8 @@ if [ -z "${CLAUDE_BIN:-}" ]; then
     # the whole ~/.local/share/claude tree, so the caged claude cannot Read/Grep the
     # rest of the install root. Extract `.../versions/<ver>` from the resolved path.
     CLAUDE_BINDS=("$CLAUDE_BIN" "$real" "$(dirname -- "$real")")
-    case "$real" in
-      */versions/*)
-        ver_rest="${real#*/versions/}"
-        CLAUDE_BINDS+=("${real%%/versions/*}/versions/${ver_rest%%/*}")
-        ;;
-    esac
+    ver_dir="$(claude_version_dir "$real")"
+    [ -n "$ver_dir" ] && CLAUDE_BINDS+=("$ver_dir")
   fi
 fi
 
