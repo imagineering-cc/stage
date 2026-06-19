@@ -635,6 +635,11 @@ function hostSpotlight() {
     // unconditionally (the 'ready != room-visible; status===asked is the gate'
     // contract; see ENGINE.md). Show-stream-only, like the rest of spotlight.
     facilitation: room.spotlight.facilitation || null,
+    // The Reader's finding (Two Minds, Slice 3) — the contained agentic repo read.
+    // Always present on the wire, null until /api/share/admit fires the read; then
+    // {status:'reading'} → {status:'ready', finding, evidence, question, ...} or
+    // {status:'none'}. Show-stream-only (rides hostSpotlight, never publicSpotlight).
+    read: room.spotlight.read || null,
   };
 }
 

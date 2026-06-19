@@ -56,6 +56,7 @@ const {
   getEventsArchive,
 } = require('./event-session');
 const { buildRecap, renderRecapHtml } = require('./recap');
+const { developReaderFinding } = require('./reader-wire');
 
 // --- HTTP helpers ---
 function readBody(req) {
@@ -817,9 +818,21 @@ async function requestHandler(req, res) {
       isFinal: false,
       status: 'listening',
       insights: null,
+      read: null,            // The Reader's finding (Slice 3); filled async below
       startedAt: Date.now(),
     };
     broadcast();
+    // THE READER GOES LIVE (Two Minds, Slice 3). Fire the contained agentic read
+    // NON-BLOCKING — the admit response returns immediately; the finding lands on
+    // room.spotlight.read (show stream) when it resolves, ready by barge-in. Gated
+    // on consentResearch (the SAME consent that gates the existing repo research):
+    // reading their repo for a finding is the same trust surface. No consent / no
+    // handle → the Reader simply never fires (read stays null). Fire-and-forget:
+    // developReaderFinding never throws and degrades to a 'none' read on any
+    // failure, so a slow/failed read can never affect the host's admit response.
+    if (id.consentResearch === true) {
+      developReaderFinding(room.spotlight.id, id.githubHandle);
+    }
     return send(res, 200, { spotlight: hostSpotlight() });
   }
 
