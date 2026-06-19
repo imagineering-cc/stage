@@ -253,9 +253,21 @@ repo…", not a finding. `ready` carries a real finding whose evidence paths wer
 validated to exist in the clone (an injected/hallucinated anchor is dropped by
 `reader.js`, and a finding with no real anchor is rejected to `none`). `none` means
 the Reader ran but produced nothing (no repo, null finding, or error) — distinct
-from `null` (never ran). The whole field is **defence-in-depth downstream of the
-cage**: raw repo bytes reach only the contained reader, never the wire — only the
-parsed, clamped finding does.
+from `null` (never ran). Terminal states are **additive transitions** (a
+`reading`→`none`/`ready` step preserves `startedAt`), not fresh objects.
+
+**Trust-boundary wording (precise — cage-match: Maxwell + Carnot).** The wire does
+NOT carry the clone or arbitrary file contents — only **bounded, structured Reader
+output** (lengths clamped, evidence capped at 3, every `path` validated to exist in
+the clone). But that output is **repo-DERIVED and attacker-INFLUENCEABLE**:
+`finding`, `question`, `evidence[].why`, and `evidence[].path` are model text about
+an attacker-controlled repo and MAY quote literals from it (the accepted "the model
+can only *speak*" threat in `ops/reader-sandbox.md`). So this is "no raw clone
+streaming", NOT "no repo-derived bytes". **Any frontend rendering `read` MUST treat
+these as untrusted display text — render via `textContent`, NEVER `innerHTML`** — or
+a `<script>`/`<img onerror>` committed into a README could XSS the (private) show
+stream. The field is show-stream-only (rides `hostSpotlight`, never the public
+payload), so this is a host-surface hardening, not a public-exposure one.
 
 **ShareEntry** (phone-led presentation queue; added protocol v1, additive)
 ```jsonc

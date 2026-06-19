@@ -619,6 +619,16 @@ function currentVisualEvent() {
   return room.visualEvent;
 }
 
+// ⚠️ NOT public-safe despite the name (cage-match: Carnot). This is a DENYLIST
+// (strip the token, keep the rest), so it carries host-only content —
+// transcript, insights, facilitation, AND read. It is used ONLY as the base of
+// hostSpotlight() (the SHOW-stream projection); it must NEVER be placed on a
+// public payload. The real public/private boundary is statePayload()'s
+// `includeSpotlight` gate (sse-hub.js): the public /api/events payload omits
+// `spotlight` ENTIRELY (pinned by the engine-contract smoke test). Do not wire
+// this onto a public stream — convert it to an explicit allowlist first
+// (tracked follow-up). The misleading name is retained only to limit this PR's
+// blast radius to the Reader slice.
 function publicSpotlight() {
   if (!room.spotlight) return null;
   const { participantToken, ...visible } = room.spotlight;

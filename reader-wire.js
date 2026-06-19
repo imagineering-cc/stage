@@ -91,26 +91,42 @@ async function resolveFocusRepo(handle) {
 //   read.status: 'reading'  — fired; repo resolved; the contained read is running
 //                'ready'    — a non-null finding landed (finding/evidence/question)
 //                'none'     — ran but produced nothing (no repo, null finding, error)
+// Build a TERMINAL read that PRESERVES the fields already set during 'reading'
+// (notably startedAt) rather than obliterating them — a state-machine transition
+// is additive, not a fresh object (cage-match: Kelvin). ENGINE.md documents
+// startedAt as "present while/once reading"; a none-after-reading that dropped it
+// would violate that and lose the "how long did it run" signal.
+function transition(extra) {
+  const prior = (room.spotlight && room.spotlight.read) || {};
+  return { ...prior, ...extra };
+}
+
 async function developReaderFinding(spotlightId, rawHandle) {
-  if (!autorunEnabled()) return;
-  const handle = normalizeGithubHandle(rawHandle);
-  if (!handle) { writeRead(spotlightId, { status: 'none', reason: 'no-handle' }); return; }
-
-  // Mark "reading" up front so the room can show "Dreamfinder is reading the repo…".
-  if (!writeRead(spotlightId, { status: 'reading', startedAt: Date.now() })) return;
-
+  // WHOLE body under try/catch (cage-match: Maxwell + Carnot). This is called
+  // fire-and-forget (un-awaited) from /api/share/admit, so a throw anywhere —
+  // INCLUDING the pre-resolve lines — must never become an unhandled rejection.
+  // The call site also attaches .catch (symmetry with developFacilitation), so
+  // this is belt-and-braces.
   try {
+    if (!autorunEnabled()) return;
+    const handle = normalizeGithubHandle(rawHandle);
+    if (!handle) { writeRead(spotlightId, transition({ status: 'none', reason: 'no-handle' })); return; }
+
+    // Mark "reading" up front so the room can show "Dreamfinder is reading the repo…".
+    if (!writeRead(spotlightId, { status: 'reading', startedAt: Date.now() })) return;
+
     const repo = await resolveFocusRepo(handle);
     if (!stillLive(spotlightId)) return;                       // spotlight changed mid-resolve
-    if (!repo) { writeRead(spotlightId, { status: 'none', reason: 'no-repo' }); return; }
+    if (!repo) { writeRead(spotlightId, transition({ status: 'none', reason: 'no-repo' })); return; }
 
-    if (!writeRead(spotlightId, { status: 'reading', repo, startedAt: Date.now() })) return;
+    // Preserve the original startedAt (transition), just annotate the resolved repo.
+    if (!writeRead(spotlightId, transition({ status: 'reading', repo }))) return;
 
     const finding = await runReader({ handle, repo, spotlightId });
     if (!stillLive(spotlightId)) return;                       // spotlight changed mid-read
 
     if (finding && finding.finding) {
-      writeRead(spotlightId, {
+      writeRead(spotlightId, transition({
         status: 'ready',
         repo,
         finding: finding.finding,
@@ -119,16 +135,16 @@ async function developReaderFinding(spotlightId, rawHandle) {
         confidence: finding.confidence || 'medium',
         kind: finding.kind || 'eerie-read',
         readyAt: Date.now(),
-      });
+      }));
     } else {
-      writeRead(spotlightId, { status: 'none', repo, reason: 'no-finding' });
+      writeRead(spotlightId, transition({ status: 'none', repo, reason: 'no-finding' }));
     }
   } catch (err) {
-    // Belt-and-braces: runReader already degrades to a null finding rather than
-    // throwing (except the cost-safety abort, which is a deliberate hard stop we
-    // do NOT swallow silently — surface it, but still don't crash the room).
+    // runReader already degrades to a null finding rather than throwing (except the
+    // cost-safety abort, a deliberate hard stop we surface but still don't let crash
+    // the room). This also catches any throw from the pre-resolve lines above.
     console.error('[READER-WIRE] developReaderFinding failed:', err.message);
-    writeRead(spotlightId, { status: 'none', reason: 'error' });
+    try { writeRead(spotlightId, transition({ status: 'none', reason: 'error' })); } catch { /* room gone */ }
   }
 }
 

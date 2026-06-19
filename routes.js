@@ -831,7 +831,12 @@ async function requestHandler(req, res) {
     // developReaderFinding never throws and degrades to a 'none' read on any
     // failure, so a slow/failed read can never affect the host's admit response.
     if (id.consentResearch === true) {
-      developReaderFinding(room.spotlight.id, id.githubHandle);
+      // Fire-and-forget with a .catch (symmetry with developFacilitation().catch
+      // at /spotlight/insights re-search): developReaderFinding wraps its whole
+      // body in try/catch, but the .catch is belt-and-braces so an un-awaited
+      // rejection can never reach the process as an unhandledRejection.
+      developReaderFinding(room.spotlight.id, id.githubHandle)
+        .catch(err => console.error('[READER-WIRE] admit-fire failed:', err.message));
     }
     return send(res, 200, { spotlight: hostSpotlight() });
   }
