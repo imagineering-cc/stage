@@ -120,7 +120,11 @@ build_probe_props() {
   done < <(grep -E '^[[:space:]]*--(property|setenv)=' "$WRAPPER_DST")
 
   # Append the resolved claude install tree (the wrapper sources this same file).
-  if [ -r "$BINDS_CONF" ]; then
+  # Integrity-gate binds.conf the way the wrapper does (not a symlink, root-owned)
+  # before sourcing it as code — a verifier should be no less careful than the
+  # thing it verifies (cage-match: Maxwell).
+  if [ -r "$BINDS_CONF" ] && [ ! -L "$BINDS_CONF" ] \
+     && [ "$(stat -c '%u' "$BINDS_CONF" 2>/dev/null)" = "0" ]; then
     # shellcheck disable=SC1090
     . "$BINDS_CONF" 2>/dev/null || true
     local b
@@ -129,14 +133,42 @@ build_probe_props() {
     done
   fi
 
-  # DRIFT GUARD: any unresolved `$VAR` means the wrapper grew a dynamic property
-  # this script doesn't know how to substitute — the probe would test a broken
-  # (or different) cage. Fail loudly + actionably instead of silently.
+  # DRIFT GUARD 1 (substitution): any unresolved `$VAR` means the wrapper grew a
+  # dynamic property this script doesn't know how to substitute — the probe would
+  # test a broken (or different) cage. Fail loudly + actionably.
   for el in "${PROBE_PROPS[@]}"; do
     case "$el" in
       *'$'*)
         printf 'DRIFT: probe property carries an unsubstituted variable: %s\n' "$el" >&2
         printf '       The wrapper (%s) changed shape. Update build_probe_props() in this script.\n' "$WRAPPER_DST" >&2
+        return 1 ;;
+    esac
+  done
+
+  # DRIFT GUARD 2 (COMPLETENESS — cage-match: Carnot). The line-anchored grep above
+  # only captures `--property=`/`--setenv=` in the wrapper's array-literal shape. A
+  # security-relevant sandbox property added later in a DIFFERENT shape (a
+  # conditional `&& ARGS+=(...)`, a `props+=(...)`, single-quotes, a continuation)
+  # would be SILENTLY OMITTED → the probe would test a WEAKER cage than production
+  # and still pass. So assert every `--property=`/`--setenv=` token in the wrapper
+  # is EITHER captured by our extractor OR one of the two known intentional
+  # exclusions (the OAuth-token setenv; the binds-loop line we rebuild from
+  # binds.conf). Any other uncaptured token = the wrapper has a property we don't
+  # test → fail. This is "the schema is a contract only if you found every writer".
+  local captured all_lines ln line
+  captured="$(grep -nE '^[[:space:]]*--(property|setenv)=' "$WRAPPER_DST" | cut -d: -f1)"
+  all_lines="$(grep -nE '\-\-(property|setenv)=' "$WRAPPER_DST" | cut -d: -f1)"
+  for ln in $all_lines; do
+    printf '%s\n' "$captured" | grep -qx "$ln" && continue   # already extracted
+    line="$(sed -n "${ln}p" "$WRAPPER_DST")"
+    case "$line" in
+      *[[:space:]]\#*|\#*)            continue ;;             # a comment, ignore
+      *CLAUDE_CODE_OAUTH_TOKEN*)      continue ;;             # token: probe-excluded by design
+      *'BindReadOnlyPaths=-"$b"'*)    continue ;;             # claude-tree loop: rebuilt from binds.conf
+      *)
+        printf 'DRIFT: wrapper has an UNCAPTURED sandbox property at line %s — the probe would not test it:\n' "$ln" >&2
+        printf '       %s\n' "$line" >&2
+        printf '       Teach build_probe_props() to capture it (or add it to the known exclusions).\n' >&2
         return 1 ;;
     esac
   done
@@ -160,13 +192,23 @@ probe_sh() {
 PROBE_CLONE="${CLONES_DIR}/__verifycage_probe__"
 DECOY_CLONE="${CLONES_DIR}/__verifycage_decoy__"
 DECOY_SENTINEL='DECOY_SIBLING_MUST_NOT_BE_VISIBLE'
+# Low-entropy cleanup (cage-match: Carnot) — refuse to rm anything that is not a
+# non-empty path strictly UNDER the clones root, so an edit that ever blanks a
+# constant can't turn this into `rm -rf /` or `rm -rf $CLONES_DIR`.
+safe_rm_clone() {
+  local p="$1"
+  case "$p" in
+    "$CLONES_DIR"/?*) rm -rf "$p" 2>/dev/null ;;
+    *) printf 'safe_rm_clone: refusing to remove path outside clones root: %s\n' "$p" >&2 ;;
+  esac
+}
 setup_probe_scratch() {
-  rm -rf "$PROBE_CLONE" "$DECOY_CLONE" 2>/dev/null
+  safe_rm_clone "$PROBE_CLONE"; safe_rm_clone "$DECOY_CLONE"
   mkdir -p "$PROBE_CLONE" "$DECOY_CLONE"          # nick owns clones/ (default ACL grants stage-reader r-x)
   printf 'probe-clone-marker\n' > "$PROBE_CLONE/README.md"
   printf '%s\n' "$DECOY_SENTINEL" > "$DECOY_CLONE/secret"
 }
-cleanup() { rm -rf "$PROBE_CLONE" "$DECOY_CLONE" 2>/dev/null; }
+cleanup() { safe_rm_clone "$PROBE_CLONE"; safe_rm_clone "$DECOY_CLONE"; }
 trap cleanup EXIT
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -203,21 +245,29 @@ check1_runs_as_reader() {
 # ════════════════════════════════════════════════════════════════════════════
 check2_allowlist_fs() {
   section "2. allowlist fs — /home + sibling clones invisible (FIX A)"
+  # cage-match CONSENSUS (Maxwell + Carnot): assert each absence INDEPENDENTLY, not
+  # "some line of the combined output said 'no such file'". The old aggregate grep
+  # could PASS while /home was mounted, as long as one OTHER probed path happened to
+  # be absent — a false green on the highest-stakes confinement property. Each
+  # violation prints its own token inside the cage; RESULT=OK only if none fired.
+  # PROBECLONE_MISSING is a POSITIVE CONTROL: it proves the probe cage actually
+  # mounted our clone, so a cage that failed to start (everything absent) can't pass
+  # by making /home "absent" too.
   local out
-  out="$(probe_sh 'ls -la /home 2>&1; echo "--H--"; cat /home/nick/.ssh/id_rsa 2>&1; echo "--D--"; cat '"$DECOY_CLONE"'/secret 2>&1; echo "--C--"; ls -la '"$CLONES_DIR"' 2>&1')"
-  local ok=1
-  printf '%s' "$out" | grep -qi 'no such file' || { ok=0; note "expected 'No such file' for absent paths"; }
-  if printf '%s' "$out" | grep -qi 'permission denied'; then
-    ok=0; note "saw 'Permission denied' — path PRESENT-but-unreadable, NOT absent (allowlist fs not in effect)"
-  fi
-  if printf '%s' "$out" | grep -q "$DECOY_SENTINEL"; then
-    ok=0; note "DECOY SIBLING CLONE WAS READABLE inside the cage — sibling isolation broken"
-  fi
-  if [ "$ok" = 1 ]; then
-    pass "/home absent, ~/.ssh absent, sibling clone invisible (allowlist fs, not read-only host)"
+  out="$(probe_sh '
+    r=OK
+    [ -e /home ]                        && { echo HOME_VISIBLE;        r=BAD; }
+    [ -e /home/nick ]                   && { echo HOMENICK_VISIBLE;    r=BAD; }
+    [ -e "'"$DECOY_CLONE"'" ]           && { echo DECOY_VISIBLE;       r=BAD; }
+    [ -r "'"$DECOY_CLONE"'/secret" ]    && { echo DECOY_READABLE;      r=BAD; }
+    [ -e "'"$PROBE_CLONE"'/README.md" ] || { echo PROBECLONE_MISSING;  r=BAD; }
+    echo "RESULT=$r"
+  ')"
+  if printf '%s\n' "$out" | grep -qx 'RESULT=OK'; then
+    pass "/home absent, /home/nick absent, sibling decoy invisible+unreadable, own clone present (allowlist fs proven)"
   else
     fail "2: allowlist filesystem confinement weaker than designed"
-    note "output: ${out:0:300}"
+    note "violations: $(printf '%s' "$out" | grep -v '^RESULT=' | tr '\n' ' ')"
   fi
 }
 
@@ -230,19 +280,32 @@ check3_egress() {
     fail "3: nftables table 'inet stage_reader' is NOT loaded — egress UNFILTERED (see task: reboot-persistence)"
     return
   fi
-  local p80 p443
-  p80="$(probe_sh 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/80" 2>&1 && echo OPEN || echo BLOCKED' /bin/bash)"
-  p443="$(probe_sh 'timeout 8 bash -c "echo > /dev/tcp/1.1.1.1/443" 2>&1 && echo OPEN || echo CLOSED' /bin/bash)"
-  if printf '%s' "$p80" | grep -q BLOCKED; then
-    pass "tcp/80 from $READER_USER is DROPPED"
-  else
-    fail "3a: tcp/80 from $READER_USER was NOT blocked (got: $(printf '%s' "$p80" | tr -d '\n'))"
+  # cage-match (Carnot): a ':80 BLOCKED' result is MEANINGLESS without a positive
+  # control — a probe that can't run at all (no /bin/bash, broken /dev/tcp,
+  # systemd-run failure, dead network, over-confined probe cage) ALSO "fails to
+  # connect", and would be mis-read as a security block. So :443 (an ALLOWED port)
+  # is the REQUIRED control: it proves the machinery + an allowed path actually
+  # work. Only then is a :80 non-connect a real DROP. For a security gate an
+  # inconclusive result is RED, not a green "informational" lamp (Feynman's
+  # wired-around experiment). Retry :443 a few times so a single network blip
+  # doesn't red the gate; a persistent failure is correctly inconclusive→fail.
+  local p443 p80 tries=0
+  while [ "$tries" -lt 3 ]; do
+    p443="$(probe_sh 'timeout 8 bash -c "echo > /dev/tcp/1.1.1.1/443" 2>&1 && echo OPEN || echo CLOSED' /bin/bash)"
+    printf '%s' "$p443" | grep -q OPEN && break
+    tries=$((tries+1))
+  done
+  if ! printf '%s' "$p443" | grep -q OPEN; then
+    fail "3: positive control FAILED — :443 (allowed) did not connect after 3 tries; egress result INCONCLUSIVE, NOT certified (probe machinery or network down)"
+    note "control output: $(printf '%s' "$p443" | tr -d '\n' | head -c 160)"
+    return
   fi
-  if printf '%s' "$p443" | grep -q OPEN; then
-    pass "tcp/443 from $READER_USER connects (API path open)"
+  pass "positive control: tcp/443 (allowed) connects — probe machinery + allowed path work"
+  p80="$(probe_sh 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/80" 2>&1 && echo OPEN || echo BLOCKED' /bin/bash)"
+  if printf '%s' "$p80" | grep -q BLOCKED && ! printf '%s' "$p80" | grep -q OPEN; then
+    pass "tcp/80 from $READER_USER is DROPPED (control proves this is a real block, not a dead probe)"
   else
-    note "tcp/443 probe got: $(printf '%s' "$p443" | tr -d '\n') (transient network? not fatal)"
-    pass "tcp/443 reachability (informational; :80 drop is the security-relevant gate)"
+    fail "3a: tcp/80 from $READER_USER was NOT blocked (got: $(printf '%s' "$p80" | tr -d '\n' | head -c 120))"
   fi
 }
 
@@ -290,8 +353,9 @@ check6_reaper() {
     fail "6: reaper NOT authorized (exit $rc) — sudoers grant missing/broken"
   fi
   # coercion PoCs: each MUST be rejected (exit 64), none may reach systemctl.
-  reject() {  # name desc
-    sudo -n "$REAPER_DST" $1 >/dev/null 2>&1; local r=$?   # unquoted: 2-token PoC
+  reject() {  # "<cmdline>" <desc> — split into an explicit argv to form the PoC
+    local -a argv; read -r -a argv <<< "$1"   # 'a b' → two args (the 2-token PoC)
+    sudo -n "$REAPER_DST" "${argv[@]}" >/dev/null 2>&1; local r=$?
     if [ "$r" -eq 64 ]; then pass "reaper rejects $2 (exit 64)"; else fail "6: reaper did NOT reject $2 (exit $r)"; fi
   }
   reject 'stage-reader-ok ssh.service' 'two-arg PoC'
@@ -359,20 +423,21 @@ check5_real_finding() {
     3) fail "5: runReader THREW (cost-safety key set? token? unexpected) — see stderr above" ;;
     *) fail "5: runReader exited unexpectedly (exit $rc)" ;;
   esac
-  # teardown hygiene: no leftover transient unit, scratch wiped.
-  if systemctl list-units 'stage-reader-*' --no-legend 2>/dev/null | grep -q .; then
-    fail "5: leftover stage-reader-* transient unit after the run (teardown incomplete)"
+  # teardown hygiene — scoped to THIS run (cage-match: Carnot — checking ALL
+  # stage-reader-* units / clone dirs false-REDS on a busy host where the live
+  # stage-server fires a concurrent read). Our run used spotlightId "verifycage",
+  # so runReader's dir is `verifycage-<hex>` and its unit `stage-reader-verifycage-<hex>`.
+  if systemctl list-units 'stage-reader-verifycage*' --all --no-legend 2>/dev/null | grep -q .; then
+    fail "5: leftover stage-reader-verifycage* transient unit (this run's teardown incomplete)"
   else
-    pass "no leftover transient cage unit after the run"
+    pass "no leftover transient cage unit from this run"
   fi
-  # runReader wipes its own runDir in finally{}; only our probe/decoy should remain.
-  local stray
-  stray="$(find "$CLONES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -Ev '__verifycage_(probe|decoy)__' | head -5)"
-  if [ -z "$stray" ]; then
-    pass "per-run scratch under clones/ was wiped (no stray run dirs)"
+  # runReader wipes its own runDir in finally{}; this run's dir must be gone.
+  if find "$CLONES_DIR" -mindepth 1 -maxdepth 1 -type d -name 'verifycage-*' 2>/dev/null | grep -q .; then
+    fail "5: this run's scratch dir (verifycage-*) was not wiped under clones/"
+    note "stray: $(find "$CLONES_DIR" -mindepth 1 -maxdepth 1 -type d -name 'verifycage-*' 2>/dev/null | tr '\n' ' ')"
   else
-    fail "5: stray run dir(s) left under clones/ — scratch not wiped"
-    note "stray: $(printf '%s' "$stray" | tr '\n' ' ')"
+    pass "this run's per-run scratch under clones/ was wiped"
   fi
 }
 
