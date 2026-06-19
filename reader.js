@@ -127,13 +127,18 @@ function cloneMaxBytes() { return numEnv('STAGE_READER_CLONE_MAX_BYTES', 50 * 10
 // git clone wall-clock timeout.
 function cloneTimeoutMs() { return numEnv('STAGE_READER_CLONE_TIMEOUT_MS', 30000); }
 // Claude model run wall-clock timeout (SIGTERM, then SIGKILL after the grace).
-// Default 180s: an AGENTIC read of a real repo on the Pi (Max-plan inference +
-// multiple Read/Grep/Glob tool round-trips) routinely exceeds 60s — verified
-// on-Pi 2026-06-19, where a 60s cap SIGTERM'd a real antirez/smallchat read to a
-// null finding while 240s produced a genuine multi-line finding. The Reader fires
-// on /share/admit and only needs to be ready by barge-in, so a longer ceiling is
-// free. Override per-deployment with STAGE_READER_TIMEOUT_MS.
-function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 180000); }
+// Default 360s. MEASURED on-Pi (Pi 4B, 2026-06-19, Slice 3 wiring): an AGENTIC
+// read scales with repo breadth — a one-file repo (antirez/smallchat, ~200 lines)
+// finishes well under 180s, but a small MULTI-file repo (rxi/microui, 54KB / ~5
+// files) needs ~5-6 MINUTES of Max-plan inference + Read/Grep/Glob round-trips on
+// the Pi's CPU. At the old 180s default, microui and ds4 both SIGTERM'd to a null
+// finding — i.e. most real repos would degrade to 'none' at a meetup. The Reader
+// fires on /share/admit and runs NON-BLOCKING in the background, only needing to
+// be ready by barge-in (typically minutes into a talk), so a generous ceiling is
+// essentially free; the only cost of a high value is a longer 'reading' state if
+// claude genuinely wedges. Override per-deployment with STAGE_READER_TIMEOUT_MS.
+// (Read latency itself is a separate optimization — see the follow-up task.)
+function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 360000); }
 // Grace between SIGTERM and SIGKILL (mirrors sprint.js's chime guard idea).
 function killGraceMs() { return numEnv('STAGE_READER_KILL_GRACE_MS', 3000); }
 

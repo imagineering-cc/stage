@@ -211,6 +211,64 @@ autonomously). `dismissed` means the host vetoed it. The archived report carries
 Citations carry **stable** `sid`s assigned once at insights-build time, so the same
 question asked again after a `…/another` cursor advance cites identically.
 
+### The Reader's finding (Two Minds, Slice 3)
+
+`spotlight.read` is an **additive**, **show-stream-only** field nested in
+`spotlight`. `ENGINE_PROTOCOL_VERSION` is **unchanged (1)** — it rides only the
+private `/api/show-events` stream (the public `/api/events` payload is unchanged).
+It is **ephemeral**: never persisted, never resumed across a restart.
+
+The Reader is **agentic Claude**, spawned headless and **OS-contained** (the cage
+in `ops/reader-sandbox.md`, verified by `ops/verify-reader-cage.sh`), that reads
+the admitted presenter's **public repo** — their most-recently-updated non-fork
+repo (the same selection the facilitation source-research uses) — and returns the
+single non-obvious *finding* a sharp senior dev would notice (PERSONA.md, "the
+eerie repo read"). It fires **on `/api/share/admit`**, NON-BLOCKING (the admit
+response returns immediately; the finding lands when it resolves, ready by
+barge-in). It is gated on the presenter's `consentResearch` consent; no consent /
+no GitHub handle → it never fires and `read` stays `null`. The Voice (a later
+slice) speaks the finding in-character.
+
+```jsonc
+"read": {
+  "status": "reading" | "ready" | "none",
+  "repo": string,                    // the resolved repo name (absent before resolve)
+  // status === "ready" only:
+  "finding": string,                 // the non-obvious observation
+  "evidence": [ { "path": string, "lines": string?, "why": string } ], // ≤ 3, paths validated to exist in the clone
+  "question": string,                // one inviting question
+  "confidence": "high" | "medium" | "reach",
+  "kind": "eerie-read",
+  "readyAt": number,
+  // status === "none" only:
+  "reason": "no-handle" | "no-repo" | "no-finding" | "error",
+  "startedAt": number                // present while/once reading
+} | null
+```
+
+**Contract note — `read` starts `null`; `status` is the gate.** `hostSpotlight()`
+always emits `read` (null until the read fires; no key surprises). `reading` means
+the contained read is in flight — a frontend shows "Dreamfinder is reading the
+repo…", not a finding. `ready` carries a real finding whose evidence paths were
+validated to exist in the clone (an injected/hallucinated anchor is dropped by
+`reader.js`, and a finding with no real anchor is rejected to `none`). `none` means
+the Reader ran but produced nothing (no repo, null finding, or error) — distinct
+from `null` (never ran). Terminal states are **additive transitions** (a
+`reading`→`none`/`ready` step preserves `startedAt`), not fresh objects.
+
+**Trust-boundary wording (precise — cage-match: Maxwell + Carnot).** The wire does
+NOT carry the clone or arbitrary file contents — only **bounded, structured Reader
+output** (lengths clamped, evidence capped at 3, every `path` validated to exist in
+the clone). But that output is **repo-DERIVED and attacker-INFLUENCEABLE**:
+`finding`, `question`, `evidence[].why`, and `evidence[].path` are model text about
+an attacker-controlled repo and MAY quote literals from it (the accepted "the model
+can only *speak*" threat in `ops/reader-sandbox.md`). So this is "no raw clone
+streaming", NOT "no repo-derived bytes". **Any frontend rendering `read` MUST treat
+these as untrusted display text — render via `textContent`, NEVER `innerHTML`** — or
+a `<script>`/`<img onerror>` committed into a README could XSS the (private) show
+stream. The field is show-stream-only (rides `hostSpotlight`, never the public
+payload), so this is a host-surface hardening, not a public-exposure one.
+
 **ShareEntry** (phone-led presentation queue; added protocol v1, additive)
 ```jsonc
 // PUBLIC (on /api/events) — NEVER carries a token:

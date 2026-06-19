@@ -88,7 +88,7 @@ function sseSnapshot(streamPath = '/api/events') {
 // --- lifecycle: boot once before all tests, tear down after ---
 test.before(async () => {
   child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, STAGE_NO_AUDIO: '1', PORT: String(PORT), STAGE_STATE_FILE: stateFile },
+    env: { ...process.env, STAGE_NO_AUDIO: '1', STAGE_READER_AUTORUN: '0', PORT: String(PORT), STAGE_STATE_FILE: stateFile },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', () => {});
@@ -304,6 +304,16 @@ test('spotlight lifecycle: archived report carries the open event id', async () 
   const started = await post('/api/spotlight/start', { token: guest.token, kind: 'introduction' });
   assert.equal(started.status, 200, 'spotlight starts for a consenting participant');
 
+  // Reader wire contract (Slice 3): hostSpotlight always emits `read` (null until
+  // the Reader fires on /api/share/admit) on the SHOW stream, and it must NEVER
+  // appear on the public stream. STAGE_READER_AUTORUN=0 in the harness keeps the
+  // real contained read from firing, so `read` is a stable null here.
+  const showSpot = await sseSnapshot('/api/show-events');
+  assert.ok(showSpot.spotlight && 'read' in showSpot.spotlight, 'show spotlight always carries a `read` key');
+  assert.equal(showSpot.spotlight.read, null, 'read is null until the Reader fires');
+  const pubSpot = await sseSnapshot('/api/events');
+  assert.ok(!('spotlight' in pubSpot), 'public stream never carries spotlight (so never the Reader finding)');
+
   // A report is only archived if it has a transcript — supply one.
   const transcript = await post('/api/spotlight/transcript', {
     token: guest.token,
@@ -510,7 +520,7 @@ function bootOnce(stateFilePath, { expectExit = false, env = {} } = {}) {
   return new Promise((resolve, reject) => {
     const myPort = bootPort++;
     const c = spawn(process.execPath, [SERVER], {
-      env: { ...process.env, STAGE_NO_AUDIO: '1', PORT: String(myPort), STAGE_STATE_FILE: stateFilePath, ...env },
+      env: { ...process.env, STAGE_NO_AUDIO: '1', STAGE_READER_AUTORUN: '0', PORT: String(myPort), STAGE_STATE_FILE: stateFilePath, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stderr = '';
