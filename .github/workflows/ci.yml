@@ -80,6 +80,16 @@ jobs:
         # fence in the prompt builder, and the never-blank-by-error fallback.
         run: STAGE_NO_AUDIO=1 node --test test/voice.test.js
 
+      - name: Research trust-boundary unit suite
+        # Zero-dep node:test suite for research.js's prompt-construction trust
+        # boundary. modelInsights() returns null before building its prompt without
+        # a key, so the metadata sanitization that keeps repo-derived bytes (a
+        # github-source title built from an attacker-controllable file PATH) out of
+        # the TRUSTED prompt region — everything before the nonce fence — is exposed
+        # as pure helpers (evidenceCatalogue / peerOverlapLine / fenceUntrusted) and
+        # pinned here. Regression guard for the PR #38 cage-match Carnot HIGH.
+        run: STAGE_NO_AUDIO=1 node --test test/research.test.js
+
   # Deploy runs ONLY on push to main (i.e. after a PR merges) AND only if
   # validation passed — so untrusted PR code never reaches the Pi, and broken
   # code never gets deployed.
