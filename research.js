@@ -81,6 +81,37 @@ function fenceUntrusted(body) {
   return { nonce, block };
 }
 
+// Build the "(catalogue)" line that lists each source's metadata OUTSIDE the fence.
+// EVERY repo-derived field is sanitized with cleanText. A github-source `title` is
+// built from the repo file PATH (githubSourceResearch: `${handle}/${repoName}/
+// ${candidate.path}`), which is attacker-controllable: a hostile filename carrying a
+// newline + `# SYSTEM: …` would otherwise land in this trusted region BEFORE the
+// fence, escaping it entirely (cage-match Carnot HIGH, PR #38). cleanText collapses
+// ALL whitespace incl. newlines, neutering the multiline-injection vector. The raw
+// excerpt still appears verbatim — but ONLY inside the nonce fence. Pure + exported
+// so the sanitization is unit-testable without a model key.
+function evidenceCatalogue(sources) {
+  return (Array.isArray(sources) ? sources : [])
+    .map(source => {
+      const kind = cleanText(source.kind, 40) || 'source';
+      const title = cleanText(source.title, 160);
+      const url = cleanText(source.url, 200);
+      if (source.kind === 'github-source') return `${kind}: ${title} (${url})`;
+      const summary = cleanText(source.summary, 240);
+      return `${kind}: ${title} - ${summary} (${url})`;
+    })
+    .join('\n');
+}
+
+// Peer-overlap prose interpolates source.title/participantName (also repo-derived),
+// so each connection string is sanitized the same way before reaching the prompt.
+function peerOverlapLine(connections) {
+  return (Array.isArray(connections) ? connections : [])
+    .map(connection => cleanText(connection, 240))
+    .filter(Boolean)
+    .join(' ');
+}
+
 // The trusted directive naming the nonce — appended to the developer/system message
 // (which the participant never controls) so the model knows which fence is real.
 function fenceDirective(nonce) {
@@ -414,11 +445,8 @@ async function modelInsights(profile, transcript, baseline) {
   // bytes OUTSIDE the fenced block below (cage-match Carnot finding) — defeating the
   // delimiter. So for github-source we print kind/title/url WITHOUT the excerpt; the
   // excerpt appears exactly once, inside the explicit untrusted-data fence.
-  const evidence = baseline.sources
-    .map(source => source.kind === 'github-source'
-      ? `${source.kind}: ${source.title} (${source.url})`
-      : `${source.kind}: ${source.title} - ${source.summary} (${source.url})`)
-    .join('\n');
+  const evidence = evidenceCatalogue(baseline.sources);
+  const peerOverlaps = peerOverlapLine(baseline.connections);
   const untrustedExcerpts = baseline.sources
     .filter(source => source.kind === 'github-source' && source.excerpt)
     .map(source => `[${source.sourceKind || 'source'}] ${source.title}:\n${source.excerpt}`)
@@ -433,7 +461,7 @@ async function modelInsights(profile, transcript, baseline) {
     `Spoken report: ${transcript || '(no transcript)'}`,
     'Retrieved public evidence (catalogue):',
     evidence || '(nothing retrieved)',
-    `Potential peer overlaps: ${baseline.connections.join(' ') || '(none found)'}`,
+    `Potential peer overlaps: ${peerOverlaps || '(none found)'}`,
     '',
     untrustedBlock,
   ].join('\n');
@@ -777,6 +805,8 @@ module.exports = {
   fetchRemote,
   fenceUntrusted,
   fenceDirective,
+  evidenceCatalogue,
+  peerOverlapLine,
   researchTerms,
   githubResearch,
   githubSourceResearch,

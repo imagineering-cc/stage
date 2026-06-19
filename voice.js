@@ -348,10 +348,21 @@ async function callOpenAI(prompt, { fetchImpl = fetchRemote } = {}) {
 // makes the clean-`text` guarantee mechanical, not merely promised. The window is
 // deliberately a substantial run (40 chars) so an incidental shared common word
 // ("the", a project name) does not trip it — only a copied SPAN does.
+// RESIDUAL (by design): this catches VERBATIM, case-folded runs only. It is
+// defence-in-depth BEHIND the nonce fence (the primary control), NOT a normalized
+// or semantic leak guard — Unicode NFC/NFD differences, or edits more frequent than
+// every LEAK_WINDOW chars, can slip past it. The fence + the SHOW-only evidence
+// projection (title/url, never the excerpt) are what actually keep raw bytes off the
+// public text; this guard is the extra net (cage-match Carnot concern, PR #38).
 const LEAK_WINDOW = 40;
 function echoesExcerpt(generated, findings) {
   if (!generated) return false;
-  const hay = generated.toLowerCase();
+  // Own our safety precondition rather than trusting the caller: this helper is
+  // EXPORTED, so cap the output we scan (cleanText also normalizes whitespace) so a
+  // future caller cannot hand it an unbounded string and turn an O(output) scan into
+  // a DoS (cage-match Carnot MEDIUM, PR #38). The production path (callOpenAI) already
+  // cleanText-caps the model line, so this is idempotent there.
+  const hay = cleanText(generated, 600).toLowerCase();
   if (hay.length < LEAK_WINDOW) return false;        // output too short to carry a span
   for (const f of Array.isArray(findings) ? findings : []) {
     const excerpt = typeof f?.excerpt === 'string' ? f.excerpt.toLowerCase() : '';
