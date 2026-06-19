@@ -112,6 +112,26 @@ function peerOverlapLine(connections) {
     .join(' ');
 }
 
+// Sanitize the participant's FIRST-PERSON inputs (their own name/title/description/
+// spoken report) for the TRUSTED prompt region. These are a DIFFERENT trust class
+// from third-party repo bytes — they are legitimately the participant's own content,
+// like a user-role message — but they are still participant-controlled, so a
+// multiline `# SYSTEM: …` payload smuggled into a description could otherwise start a
+// new logical line in the trusted region. cleanText collapses ALL whitespace (incl.
+// newlines), so an injected directive can never begin its own line. The live caller
+// (developSpotlightInsights → participantProfile / cleanText) already collapses these,
+// but modelInsights OWNS its own precondition so a future caller (or the Voice path)
+// cannot pass raw bytes through. Pure + exported for unit testing (cage-match Carnot
+// follow-up, PR #38 → task #14).
+function participantPromptFields(profile = {}, transcript = '') {
+  return {
+    name: cleanText(profile && profile.name, 80),
+    title: cleanText(profile && profile.projectTitle, 120) || '(untitled)',
+    description: cleanText(profile && profile.projectDescription, 600) || '(not supplied)',
+    report: cleanText(transcript, 6000) || '(no transcript)',
+  };
+}
+
 // The trusted directive naming the nonce — appended to the developer/system message
 // (which the participant never controls) so the model knows which fence is real.
 function fenceDirective(nonce) {
@@ -447,6 +467,8 @@ async function modelInsights(profile, transcript, baseline) {
   // excerpt appears exactly once, inside the explicit untrusted-data fence.
   const evidence = evidenceCatalogue(baseline.sources);
   const peerOverlaps = peerOverlapLine(baseline.connections);
+  // First-person participant inputs, sanitized at THIS boundary (see helper).
+  const fp = participantPromptFields(profile, transcript);
   const untrustedExcerpts = baseline.sources
     .filter(source => source.kind === 'github-source' && source.excerpt)
     .map(source => `[${source.sourceKind || 'source'}] ${source.title}:\n${source.excerpt}`)
@@ -455,10 +477,10 @@ async function modelInsights(profile, transcript, baseline) {
   // into a README cannot forge the close and escape the fence (see fenceUntrusted).
   const { nonce, block: untrustedBlock } = fenceUntrusted(untrustedExcerpts);
   const prompt = [
-    `Participant: ${profile.name}`,
-    `Project: ${profile.projectTitle || '(untitled)'}`,
-    `Description: ${profile.projectDescription || '(not supplied)'}`,
-    `Spoken report: ${transcript || '(no transcript)'}`,
+    `Participant: ${fp.name}`,
+    `Project: ${fp.title}`,
+    `Description: ${fp.description}`,
+    `Spoken report: ${fp.report}`,
     'Retrieved public evidence (catalogue):',
     evidence || '(nothing retrieved)',
     `Potential peer overlaps: ${peerOverlaps || '(none found)'}`,
@@ -807,6 +829,7 @@ module.exports = {
   fenceDirective,
   evidenceCatalogue,
   peerOverlapLine,
+  participantPromptFields,
   researchTerms,
   githubResearch,
   githubSourceResearch,
