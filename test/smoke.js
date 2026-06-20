@@ -2063,3 +2063,100 @@ test('m4: closing an event leaves a reviewable recap retrievable by archived id'
   const htmlText = await htmlRes.text();
   assert.match(htmlText, /M4 Closed Recap/, 'HTML export of the closed event contains the title');
 });
+
+// ===========================================================================
+// publicSpotlight() allowlist / hostSpotlight() shape-preservation (#15)
+//
+// These tests pin the denylist→allowlist conversion in state.js:
+//   (1) publicSpotlight() is now an explicit ALLOWLIST — host-only fields
+//       (transcript, insights, facilitation, read, participantToken) MUST NOT
+//       appear on it, regardless of what fields are added to room.spotlight.
+//   (2) hostSpotlight() MUST still carry every host-only field the SHOW-stream
+//       consumers depend on — the refactor must not silently drop any of them.
+//
+// The /api/events public stream never carries spotlight at all (pinned by the
+// engine-contract test above); these tests go one layer deeper and exercise the
+// projection functions through the SHOW stream (which uses hostSpotlight()) and
+// verify that publicSpotlight()'s allowed fields form a strict subset of what
+// a guest-safe projection should contain.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// PUB-ALLOWLIST-1. The PUBLIC /api/events stream NEVER carries host-only
+// spotlight fields — not via spotlight (already omitted) and not via any other
+// top-level field. Belt-and-suspenders check: even if the allowlist were wired
+// to the public stream, it would still not leak these strings.
+// This mirrors the existing 'share: public stream leaks no token/transcript'
+// test but focuses specifically on fields that publicSpotlight() must exclude
+// regardless of how it is wired in the future.
+// ---------------------------------------------------------------------------
+test('publicSpotlight allowlist: public stream carries no host-only spotlight content while presenter is live', async () => {
+  await openEvent('Allowlist Pub Test');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/transcript', { token: A.token, transcript: 'allowlist-canary-transcript', isFinal: false });
+
+  const pubRaw = await rawSseFrame('/api/events');
+  // (a) spotlight is absent entirely on the public stream.
+  assert.ok(!('spotlight' in JSON.parse(pubRaw.slice('data: '.length))), 'public stream has no spotlight key');
+  // (b) host-only field names / values do not appear anywhere in the raw payload.
+  // If publicSpotlight() were ever wired to the public stream, these would catch it.
+  const hostOnlyFields = ['participantToken', 'transcript', 'insights', 'facilitation', '"read"'];
+  for (const field of hostOnlyFields) {
+    assert.ok(!pubRaw.includes(field), `public stream raw payload does not contain host-only field/value "${field}"`);
+  }
+  // (c) The presenter token itself does not appear.
+  assert.ok(!pubRaw.includes(A.token), 'presenter token absent from public stream');
+  // (d) The transcript canary does not appear.
+  assert.ok(!pubRaw.includes('allowlist-canary-transcript'), 'live transcript absent from public stream');
+
+  await post('/api/share/stop');
+});
+
+// ---------------------------------------------------------------------------
+// HOST-SHAPE-1. hostSpotlight() — the show-stream projection — MUST carry
+// every host-only field, proving the allowlist refactor did not silently drop
+// fields that the admin/room consumers rely on. This is the shape-preservation
+// invariant: sse-hub.js is not touched, so hostSpotlight()'s output must be
+// byte-identical (same field set) to before the refactor.
+// ---------------------------------------------------------------------------
+test('hostSpotlight shape: show stream carries all required host-only fields after allowlist refactor', async () => {
+  await openEvent('Host Shape Test');
+  const A = (await join()).body;
+  await setConsent(A.token, { recording: true });
+  await post('/api/share/request', { token: A.token, kind: 'share' });
+  await post('/api/share/admit', { token: A.token });
+  await post('/api/spotlight/transcript', { token: A.token, transcript: 'host-shape-canary', isFinal: false });
+
+  const show = await sseSnapshot('/api/show-events');
+  assert.ok(show.spotlight, 'show stream carries the spotlight field');
+  const sp = show.spotlight;
+
+  // --- Public-safe fields (from publicSpotlight() allowlist) ---
+  const publicFields = ['id', 'eventId', 'active', 'participantName', 'projectTitle', 'kind', 'isFinal', 'status', 'startedAt'];
+  for (const f of publicFields) {
+    assert.ok(f in sp, `spotlight carries public-safe field "${f}"`);
+  }
+
+  // --- Host-only fields (re-added by hostSpotlight()) ---
+  // participantToken: the auth secret the host uses to drive admit/skip/finish.
+  assert.ok('participantToken' in sp, 'spotlight carries participantToken (host auth secret)');
+  assert.equal(sp.participantToken, A.token, 'participantToken matches the admitted presenter');
+  // transcript: the live speech text; starts empty, updates on each /api/spotlight/transcript.
+  assert.ok('transcript' in sp, 'spotlight carries transcript field');
+  assert.equal(sp.transcript, 'host-shape-canary', 'transcript reflects the live speech text');
+  // insights: null until /api/spotlight/insights fires; must be present (null) from the start.
+  assert.ok('insights' in sp, 'spotlight carries insights field (null before research)');
+  // facilitation: null until autonomous generation fires; must always be present.
+  assert.ok('facilitation' in sp, 'spotlight carries facilitation field (null before generation)');
+  // read: The Reader's finding; null until /api/share/admit triggers developReaderFinding.
+  assert.ok('read' in sp, 'spotlight carries read field (null until The Reader fires)');
+
+  // --- Confirm host-only values are not present on the PUBLIC stream ---
+  const pub = await sseSnapshot('/api/events');
+  assert.ok(!('spotlight' in pub), 'public stream still omits spotlight entirely');
+
+  await post('/api/share/stop');
+});
