@@ -761,3 +761,158 @@ test('reaper: ACCEPTS a valid stage-reader-<token> name (passes the gate; env-aw
     }
   }
 });
+
+// ── perf-optimisation: pruneNoise / selectKeyFiles / buildHuntPrompt ──────────
+// These are the pure helpers added in the read-latency optimisation (2026-06-20).
+// Measurement context: on Pi 4B against rxi/microui (54KB, ~10 files including
+// atlas.inl at 69KB): tool I/O costs ~2s; inference API round-trips cost ~140s.
+// The helpers reduce API turns by shrinking the file surface the model explores.
+
+// Helper: make a test clone tree with known files.
+function makeTestClone() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-perf-'));
+  // Simulate rxi/microui layout: source files + a large data file.
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.mkdirSync(path.join(dir, 'demo'));
+  fs.mkdirSync(path.join(dir, 'doc'));
+  // Source files (should be KEPT by pruneNoise and picked by selectKeyFiles).
+  fs.writeFileSync(path.join(dir, 'README.md'), '# microui\nA tiny UI lib.\n');
+  fs.writeFileSync(path.join(dir, 'src', 'microui.c'), Buffer.alloc(37000, 'a')); // 37KB
+  fs.writeFileSync(path.join(dir, 'src', 'microui.h'), Buffer.alloc(9600, 'b'));  // 9.6KB
+  fs.writeFileSync(path.join(dir, 'demo', 'main.c'), Buffer.alloc(9700, 'c'));    // 9.7KB
+  fs.writeFileSync(path.join(dir, 'demo', 'renderer.c'), Buffer.alloc(4900, 'd')); // 4.9KB
+  // Noise files (should be DELETED by pruneNoise).
+  fs.writeFileSync(path.join(dir, 'demo', 'atlas.inl'), Buffer.alloc(69600, 'x')); // 69KB .inl
+  fs.writeFileSync(path.join(dir, 'logo.png'), Buffer.alloc(40000, 'p'));           // .png
+  // A .md doc (not noise, kept but not a recognised source ext for selectKeyFiles).
+  fs.writeFileSync(path.join(dir, 'doc', 'usage.md'), 'usage\n');
+  return dir;
+}
+
+test('pruneNoise: deletes .inl and .png noise files, leaves source files intact', () => {
+  const dir = makeTestClone();
+  try {
+    const { deleted, bytes } = reader.pruneNoise(dir);
+    assert.ok(deleted >= 2, `at least 2 noise files deleted, got ${deleted}`);
+    assert.ok(bytes >= 69000, `at least 69KB pruned, got ${bytes}`);
+    // Noise files must be gone.
+    assert.equal(fs.existsSync(path.join(dir, 'demo', 'atlas.inl')), false, 'atlas.inl deleted');
+    assert.equal(fs.existsSync(path.join(dir, 'logo.png')), false, 'logo.png deleted');
+    // Source files must survive.
+    assert.ok(fs.existsSync(path.join(dir, 'src', 'microui.c')), 'microui.c kept');
+    assert.ok(fs.existsSync(path.join(dir, 'src', 'microui.h')), 'microui.h kept');
+    assert.ok(fs.existsSync(path.join(dir, 'README.md')), 'README.md kept');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pruneNoise: an empty clone dir produces {deleted:0, bytes:0}', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-empty-'));
+  try {
+    const result = reader.pruneNoise(dir);
+    assert.deepEqual(result, { deleted: 0, bytes: 0 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pruneNoise: does NOT delete .git directory contents', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-git-noise-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.git'));
+    // Put a big .inl inside .git — should NOT be touched (walkFiles skips .git).
+    fs.writeFileSync(path.join(dir, '.git', 'huge.inl'), Buffer.alloc(200000, 'z'));
+    const { deleted } = reader.pruneNoise(dir);
+    assert.equal(deleted, 0, '.git contents must not be pruned');
+    assert.ok(fs.existsSync(path.join(dir, '.git', 'huge.inl')), '.git/huge.inl still present');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('selectKeyFiles: README is always first, then largest source files', () => {
+  const dir = makeTestClone();
+  try {
+    const keys = reader.selectKeyFiles(dir);
+    // README must be first.
+    assert.equal(keys[0], 'README.md', 'README first');
+    // Must include the largest source file (microui.c at 37KB).
+    assert.ok(keys.includes('src/microui.c'), 'largest .c included');
+    // All returned paths must exist in the clone.
+    for (const k of keys) {
+      assert.ok(fs.existsSync(path.join(dir, k)), `${k} must exist`);
+    }
+    // Must not exceed KEY_FILE_LIMIT (5).
+    assert.ok(keys.length <= 5, `at most 5 key files, got ${keys.length}`);
+    // Must not include the noise files (they're not source ext).
+    assert.ok(!keys.includes('demo/atlas.inl'), 'noise file excluded');
+    assert.ok(!keys.includes('logo.png'), 'png excluded');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('selectKeyFiles: empty clone returns empty array', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-empty2-'));
+  try {
+    assert.deepEqual(reader.selectKeyFiles(dir), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('selectKeyFiles: no README → largest source file is first', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-nosrc-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'main.py'), Buffer.alloc(5000, 'z'));   // 5KB
+    fs.writeFileSync(path.join(dir, 'util.py'), Buffer.alloc(2000, 'u'));   // 2KB
+    const keys = reader.selectKeyFiles(dir);
+    assert.equal(keys[0], 'main.py', 'largest source first when no README');
+    assert.ok(keys.includes('util.py'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('buildHuntPrompt: with key files injects a "Start with these" section', () => {
+  const prompt = reader.buildHuntPrompt(['src/microui.c', 'README.md']);
+  assert.ok(prompt.includes('Start with these high-signal files'), 'hint injected');
+  assert.ok(prompt.includes('src/microui.c'), 'key file listed');
+  assert.ok(prompt.includes('README.md'), 'README listed');
+  // Core persona text must still be present.
+  assert.ok(prompt.includes('jaw-on-the-floor'), 'persona text present');
+  assert.ok(prompt.includes('"kind": "eerie-read"'), 'JSON shape still there');
+});
+
+test('buildHuntPrompt: empty key files → no hint section, full prompt still valid', () => {
+  const promptNone = reader.buildHuntPrompt([]);
+  assert.ok(!promptNone.includes('Start with these'), 'no hint when no key files');
+  assert.ok(promptNone.includes('jaw-on-the-floor'), 'persona text present');
+  // Must be equivalent to the legacy HUNT_PROMPT constant.
+  assert.equal(promptNone, reader.HUNT_PROMPT, 'equals HUNT_PROMPT constant');
+});
+
+test('buildHuntPrompt: undefined key files → same as empty (graceful)', () => {
+  const promptUndef = reader.buildHuntPrompt(undefined);
+  assert.equal(promptUndef, reader.HUNT_PROMPT, 'undefined → base prompt');
+});
+
+test('buildSpawn: sandbox stdinPrompt uses the provided prompt, not always HUNT_PROMPT', () => {
+  withSpawnEnv({ STAGE_READER_WRAPPER: '/usr/local/sbin/stage-reader-run' }, () => {
+    const customPrompt = 'CUSTOM PROMPT FOR TEST';
+    const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', { HOME: '/h' }, customPrompt);
+    assert.equal(s.command, 'sudo', 'still sandbox mode');
+    assert.equal(s.stdinPrompt, customPrompt, 'stdinPrompt is the provided prompt, not HUNT_PROMPT');
+  });
+});
+
+test('buildSpawn: direct mode args include the provided prompt as -p', () => {
+  withSpawnEnv({ STAGE_READER_UNSAFE_DIRECT: '1', STAGE_READER_CLAUDE_BIN: '/opt/claude' }, () => {
+    const customPrompt = 'MY KEY FILES HINT';
+    const s = reader.buildSpawn('/clone', { HOME: '/h' }, customPrompt);
+    const pIdx = s.args.indexOf('-p');
+    assert.ok(pIdx !== -1, '-p flag present');
+    assert.equal(s.args[pIdx + 1], customPrompt, 'prompt passed as -p value');
+  });
+});

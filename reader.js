@@ -127,48 +127,228 @@ function cloneMaxBytes() { return numEnv('STAGE_READER_CLONE_MAX_BYTES', 50 * 10
 // git clone wall-clock timeout.
 function cloneTimeoutMs() { return numEnv('STAGE_READER_CLONE_TIMEOUT_MS', 30000); }
 // Claude model run wall-clock timeout (SIGTERM, then SIGKILL after the grace).
-// Default 360s. MEASURED on-Pi (Pi 4B, 2026-06-19, Slice 3 wiring): an AGENTIC
-// read scales with repo breadth — a one-file repo (antirez/smallchat, ~200 lines)
-// finishes well under 180s, but a small MULTI-file repo (rxi/microui, 54KB / ~5
-// files) needs ~5-6 MINUTES of Max-plan inference + Read/Grep/Glob round-trips on
-// the Pi's CPU. At the old 180s default, microui and ds4 both SIGTERM'd to a null
-// finding — i.e. most real repos would degrade to 'none' at a meetup. The Reader
-// fires on /share/admit and runs NON-BLOCKING in the background, only needing to
-// be ready by barge-in (typically minutes into a talk), so a generous ceiling is
-// essentially free; the only cost of a high value is a longer 'reading' state if
-// claude genuinely wedges. Override per-deployment with STAGE_READER_TIMEOUT_MS.
-// (Read latency itself is a separate optimization — see the follow-up task.)
-function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 360000); }
+// MEASURED on-Pi (Pi 4B, 2026-06-20): the bottleneck is API round-trips (inference),
+// NOT filesystem tool-call I/O. For rxi/microui (a small C UI library, ~5 source
+// files + a 69KB atlas.inl data file):
+//   - 54 tool calls total (Read×28, Grep×22, Glob×4): only ~2.2s of tool time
+//   - 2 Explore sub-agents ran ~84s each; 31+10 API turns = ~41 inference round-trips
+//   - Total wall-clock: ~142s (two concurrent runs on an overloaded Pi)
+// Key driver: the model spawns builtin:Explore sub-agents which iterate many turns
+// over the file tree. Reducing the file surface (pre-pruning noise files like atlas.inl
+// and injecting a key-files hint) lowers the number of exploration turns needed before
+// the model converges on the interesting code, directly reducing API round-trips.
+// Default 240s (down from 360s band-aid) — feasible now that pre-pruning eliminates
+// the largest noise source; override per-deployment with STAGE_READER_TIMEOUT_MS.
+function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 240000); }
 // Grace between SIGTERM and SIGKILL (mirrors sprint.js's chime guard idea).
 function killGraceMs() { return numEnv('STAGE_READER_KILL_GRACE_MS', 3000); }
 
+// ── file-surface pre-filtering ────────────────────────────────────────────────
+//
+// MEASUREMENT-DRIVEN: the bottleneck is API round-trips (inference), not tool I/O.
+// Reducing the file tree the model explores means fewer Explore sub-agent turns,
+// which directly cuts wall-clock. Two mechanisms:
+//   1. pruneNoise(cloneDir)    — deletes files that add tokens but no signal
+//      (large data files, compiled output, generated atlases, binary blobs)
+//      BEFORE the model starts. Claude never sees them in Glob results.
+//   2. selectKeyFiles(cloneDir) — returns the ≤5 highest-signal source files
+//      so the hunt prompt can tell the model WHERE to start looking. Mirrors
+//      research.js's githubSourceResearch "largest top-level source file" heuristic
+//      but walks the local clone tree.
+//
+// Both are pure / side-effect-free (modulo the intentional deletion in pruneNoise)
+// and exported for unit testing.
+
+// Extensions treated as source code (worth reading for the "eerie observation").
+// Intentionally does NOT include .inl, .dat, .bin, .pb, .proto, .json (config),
+// .lock, .yaml, .toml, .md (docs), .txt, .csv, .svg, .png, etc.
+const SOURCE_EXTS = new Set([
+  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
+  '.py', '.pyw',
+  '.go',
+  '.rs',
+  '.java', '.kt', '.kts',
+  '.rb',
+  '.c', '.cc', '.cpp', '.cxx', '.c++',
+  '.h', '.hh', '.hpp', '.hxx',
+  '.cs',
+  '.swift',
+  '.dart',
+  '.php',
+  '.lua',
+  '.ex', '.exs',
+  '.hs', '.lhs',
+  '.clj', '.cljs',
+  '.ml', '.mli',
+  '.scala',
+  '.sh', '.bash',
+  '.zig',
+  '.nim',
+]);
+
+// Files whose basenames (case-insensitive) are always high-signal regardless of ext.
+const HIGH_SIGNAL_BASENAMES = new Set([
+  'readme.md', 'readme', 'readme.txt', 'readme.rst',
+]);
+
+// Extensions whose files are NEVER worth reading (generated data, binary blobs,
+// compiled assets, package manifests that list deps but contain no logic, etc).
+// These are deleted by pruneNoise before the model starts.
+const NOISE_EXTS = new Set([
+  '.inl',   // inline data arrays (C/C++ atlas textures, etc)
+  '.bin', '.dat', '.raw', '.blob',
+  '.pb', '.pb.go',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.tga',
+  '.svg',   // large SVGs are generated/data, not logic
+  '.wasm',
+  '.so', '.dylib', '.dll', '.a', '.lib', '.obj', '.o',
+  '.pyc', '.pyo', '.pyd',
+  '.class',
+  '.jar', '.war', '.ear',
+  '.exe', '.elf',
+  '.zip', '.gz', '.tar', '.bz2', '.xz', '.7z', '.rar',
+  '.parquet', '.csv', '.tsv', '.sqlite', '.db',
+  '.mp3', '.mp4', '.wav', '.ogg', '.flac',
+]);
+
+// Max single-file size to keep (anything larger AND not a recognised source ext
+// is likely generated data). Source files above this threshold are kept but noted.
+const NOISE_SIZE_BYTES = numEnv('STAGE_READER_NOISE_MAX_BYTES', 100 * 1024); // 100KB
+
+// Maximum number of key files to surface in the hint.
+const KEY_FILE_LIMIT = 5;
+
+// Recursively walk `dir`, returning [{relPath, size, isSource}] for every non-.git
+// non-symlink file. Stops collecting once `cap` files have been seen (safety bound).
+function walkFiles(dir, cap = 2000) {
+  const results = [];
+  const stack = [{ dir, prefix: '' }];
+  while (stack.length && results.length < cap) {
+    const { dir: cur, prefix } = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+    for (const ent of entries) {
+      if (ent.name === '.git') continue;
+      if (ent.isSymbolicLink()) continue;
+      const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) {
+        stack.push({ dir: path.join(cur, ent.name), prefix: rel });
+      } else if (ent.isFile()) {
+        let size = 0;
+        try { size = fs.statSync(path.join(cur, ent.name)).size; } catch { /* vanished */ }
+        const ext = path.extname(ent.name).toLowerCase();
+        const base = ent.name.toLowerCase();
+        const isSource = SOURCE_EXTS.has(ext) || HIGH_SIGNAL_BASENAMES.has(base);
+        results.push({ relPath: rel, size, ext, base, isSource });
+      }
+    }
+  }
+  return results;
+}
+
+// pruneNoise(cloneDir) — delete files that add tokens but no signal, BEFORE the
+// model starts. Specifically: files whose extension is in NOISE_EXTS, OR non-source
+// files larger than NOISE_SIZE_BYTES. Returns {deleted: number, bytes: number}.
+// This is a targeted cleanup — it only removes unambiguous noise, never source files.
+// Security note: cloneDir is always a server-controlled scratch path that we wipe
+// entirely in finally{}; deletion here just makes the pre-wipe set smaller for Claude.
+function pruneNoise(cloneDir) {
+  const files = walkFiles(cloneDir);
+  let deleted = 0;
+  let bytes = 0;
+  for (const { relPath, size, ext, isSource } of files) {
+    const isNoise = NOISE_EXTS.has(ext) || (!isSource && size > NOISE_SIZE_BYTES);
+    if (!isNoise) continue;
+    try {
+      fs.rmSync(path.join(cloneDir, relPath));
+      deleted++;
+      bytes += size;
+    } catch { /* already gone or permission issue; harmless */ }
+  }
+  return { deleted, bytes };
+}
+
+// selectKeyFiles(cloneDir) — return the ≤KEY_FILE_LIMIT relative paths of the
+// highest-signal source files in the clone, ordered by signal strength. Used to
+// inject a starting hint into the hunt prompt so the model can open the most
+// interesting code first rather than exploring from scratch.
+//
+// Signal ordering (descending):
+//   1. README (always high signal — the author's own framing)
+//   2. Largest source files by extension (most logic lives in the biggest files)
+//   3. Smaller source files if budget remains
+//
+// Pure: only reads metadata, never modifies anything. Exported for unit tests.
+function selectKeyFiles(cloneDir) {
+  const files = walkFiles(cloneDir);
+
+  // Step 1: find the README (if any).
+  const readme = files.find(f => HIGH_SIGNAL_BASENAMES.has(f.base));
+
+  // Step 2: source files sorted by size descending (largest first = most logic).
+  const sources = files
+    .filter(f => f.isSource && !HIGH_SIGNAL_BASENAMES.has(f.base))
+    .sort((a, b) => b.size - a.size);
+
+  // Assemble: README first, then top sources up to KEY_FILE_LIMIT.
+  const ordered = [];
+  if (readme) ordered.push(readme.relPath);
+  for (const f of sources) {
+    if (ordered.length >= KEY_FILE_LIMIT) break;
+    ordered.push(f.relPath);
+  }
+  return ordered;
+}
+
 // The hunt prompt — the amazement engine (PERSONA.md §"the eerie repo read").
-// Instruct Claude to find the SINGLE non-obvious thing, cite exact files, and
-// return finding:null rather than a weak finding. Output ONLY the JSON object.
-const HUNT_PROMPT = [
-  'You are reading a software repository as a sharp, careful senior engineer.',
-  '',
-  'Find the SINGLE thing the author would be STUNNED someone noticed on a careful',
-  'read — an inconsistency, a load-bearing TODO, a pattern that breaks its own',
-  'convention, a clever-but-fragile choice, an abstraction that leaks in exactly',
-  'one place. NOT a summary. NOT "I see you use X". The jaw-on-the-floor "how did',
-  'it notice THAT?" thing that a sharp senior dev would catch.',
-  '',
-  'Cite exact files (and line ranges where you can). If nothing genuinely',
-  'non-obvious exists, return {"finding": null} — a weak finding is worse than',
-  'none, and a confidently-wrong observation is the opposite of magic.',
-  '',
-  'Return ONLY a single JSON object, no prose around it, in exactly this shape:',
-  '{',
-  '  "finding": "<one or two sentences, the non-obvious specific observation>",',
-  '  "evidence": [{"path": "relative/path.ext", "lines": "10-24", "why": "<why this is the anchor>"}],',
-  '  "question": "<one inviting question — \'deliberate, or did it predate the pattern?\' energy>",',
-  '  "confidence": "high" | "medium" | "reach",',
-  '  "kind": "eerie-read"',
-  '}',
-  'evidence: 1 to 3 anchors, each citing a real file in this repo. lines is optional.',
-  'If you have nothing worth saying, return {"finding": null} and nothing else.',
-].join('\n');
+// Accepts an optional keyFiles array (from selectKeyFiles) to front-load the
+// highest-signal files, reducing the exploration turns the model needs before
+// converging on the interesting code. The core PERSONA.md text is unchanged.
+function buildHuntPrompt(keyFiles) {
+  const lines = [
+    'You are reading a software repository as a sharp, careful senior engineer.',
+    '',
+    'Find the SINGLE thing the author would be STUNNED someone noticed on a careful',
+    'read — an inconsistency, a load-bearing TODO, a pattern that breaks its own',
+    'convention, a clever-but-fragile choice, an abstraction that leaks in exactly',
+    'one place. NOT a summary. NOT "I see you use X". The jaw-on-the-floor "how did',
+    'it notice THAT?" thing that a sharp senior dev would catch.',
+    '',
+  ];
+
+  // Key-files hint: only inject if we have candidates (small repos may have none).
+  if (keyFiles && keyFiles.length > 0) {
+    lines.push(
+      'Start with these high-signal files (largest source files + README):',
+      keyFiles.map(f => `  ${f}`).join('\n'),
+      'Read the ones most likely to contain the non-obvious thing first.',
+      '',
+    );
+  }
+
+  lines.push(
+    'Cite exact files (and line ranges where you can). If nothing genuinely',
+    'non-obvious exists, return {"finding": null} — a weak finding is worse than',
+    'none, and a confidently-wrong observation is the opposite of magic.',
+    '',
+    'Return ONLY a single JSON object, no prose around it, in exactly this shape:',
+    '{',
+    '  "finding": "<one or two sentences, the non-obvious specific observation>",',
+    '  "evidence": [{"path": "relative/path.ext", "lines": "10-24", "why": "<why this is the anchor>"}],',
+    '  "question": "<one inviting question — \'deliberate, or did it predate the pattern?\' energy>",',
+    '  "confidence": "high" | "medium" | "reach",',
+    '  "kind": "eerie-read"',
+    '}',
+    'evidence: 1 to 3 anchors, each citing a real file in this repo. lines is optional.',
+    'If you have nothing worth saying, return {"finding": null} and nothing else.',
+  );
+
+  return lines.join('\n');
+}
+
+// Legacy export alias: the no-keyFiles version, for backward compat with tests
+// that reference HUNT_PROMPT directly. buildHuntPrompt() is the canonical form.
+const HUNT_PROMPT = buildHuntPrompt([]);
 
 // ── concurrency: one Reader at a time (single spotlight) ─────────────────────
 let active = false;
@@ -434,9 +614,9 @@ function cloneRepo(handle, repo, dest) {
 //   HOME/CLAUDE_CONFIG_DIR (direct mode: childEnv; sandbox mode: the wrapper).
 // Direct mode passes the prompt as `-p <prompt>` argv (simplest for the local
 // dev/CI path); sandbox mode pipes the prompt via stdin (see buildSpawn / FIX B).
-function claudeArgsDirect() {
+function claudeArgsDirect(prompt) {
   return [
-    '-p', HUNT_PROMPT,
+    '-p', prompt,
     '--output-format', 'json',
     '--allowedTools', 'Read,Grep,Glob',
     '--disallowedTools', 'Write,Edit,Bash,WebFetch,WebSearch',
@@ -460,7 +640,10 @@ function claudeArgsDirect() {
 //   Returns { command, args, spawnOpts, unit|null, stdinPrompt|null } — `unit` is
 //   the deterministic transient systemd unit name (sandbox only) so the kill-path
 //   can target it directly.
-function buildSpawn(cloneDir, childEnv) {
+// `prompt` is the hunt prompt string (built by buildHuntPrompt with key-files hint).
+// Defaults to the base HUNT_PROMPT (no key-files hint) if omitted — backward compat.
+function buildSpawn(cloneDir, childEnv, prompt) {
+  if (prompt === undefined) prompt = HUNT_PROMPT;
   if (sandboxEnabled()) {
     // UNIQUE-PER-RUN unit name (cage-match round-2 MED). cloneDir is always
     // `<runDir>/clone`, so basename(cloneDir) === "clone" for EVERY run — a
@@ -487,12 +670,12 @@ function buildSpawn(cloneDir, childEnv) {
         stdio: ['pipe', 'pipe', 'pipe'],
       },
       unit,
-      stdinPrompt: HUNT_PROMPT,
+      stdinPrompt: prompt,
     };
   }
   return {
     command: claudeBin(),
-    args: claudeArgsDirect(),
+    args: claudeArgsDirect(prompt),
     spawnOpts: { cwd: cloneDir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
     unit: null,
     stdinPrompt: null,
@@ -502,9 +685,10 @@ function buildSpawn(cloneDir, childEnv) {
 // ── the model run (spawn claude, bounded, parse, reap) ───────────────────────
 // Spawns claude read-only over the clone, captures stdout, enforces the wall
 // clock with SIGTERM→SIGKILL, and resolves to the parsed finding or null.
-function runClaude(cloneDir, childEnv) {
+// `prompt` is the hunt prompt built by buildHuntPrompt (with key-files hint injected).
+function runClaude(cloneDir, childEnv, prompt) {
   return new Promise((resolve) => {
-    const { command, args, spawnOpts, unit, stdinPrompt } = buildSpawn(cloneDir, childEnv);
+    const { command, args, spawnOpts, unit, stdinPrompt } = buildSpawn(cloneDir, childEnv, prompt);
     // Cost-safety, second gate: the sudo/wrapper path must NEVER carry an API
     // key into the cage. buildChildEnv already threw if one is set in the server
     // env, but assert again on the literal env we hand the spawn (belt + braces).
@@ -694,7 +878,33 @@ async function runReader({ handle, repo, spotlightId } = {}) {
       return { finding: null };
     }
 
-    const finding = await runClaude(cloneDir, childEnv);
+    // ── PERF: pre-filter noise BEFORE the model starts ───────────────────────
+    // MEASURED (Pi 4B, 2026-06-20): the bottleneck is API inference round-trips
+    // (tool I/O only ~2s of ~140s). Deleting noise files (large .inl, binary
+    // blobs, etc.) before claude starts means the builtin:Explore sub-agent sees
+    // a smaller file tree → fewer exploration turns → fewer API round-trips.
+    // Example: rxi/microui's atlas.inl is 69KB of inline data; pruning it removes
+    // one Read call AND prevents Glob from surfacing it as a candidate to explore.
+    const pruned = pruneNoise(cloneDir);
+    if (pruned.deleted > 0) {
+      console.log(
+        `[READER] pruned ${pruned.deleted} noise file(s) (~${Math.round(pruned.bytes / 1024)}KB) before model start`,
+      );
+    }
+
+    // Select the highest-signal source files to inject as a starting hint. This
+    // tells the model WHERE to look first, avoiding exploratory Glob/Read turns
+    // spent discovering the file tree from scratch.
+    const keyFiles = selectKeyFiles(cloneDir);
+    if (keyFiles.length > 0) {
+      console.log(`[READER] key files hint: ${keyFiles.join(', ')}`);
+    }
+
+    // Build the prompt with the key-files hint injected. In DIRECT mode this
+    // goes as argv; in SANDBOX mode it goes via stdin (buildSpawn handles both).
+    const prompt = buildHuntPrompt(keyFiles);
+
+    const finding = await runClaude(cloneDir, childEnv, prompt);
     return finding || { finding: null };
   } catch (err) {
     // The cost-safety assertion is the one thing we DO want to surface loudly —
@@ -735,4 +945,10 @@ module.exports = {
   safeSegment,
   readOAuthToken,
   HUNT_PROMPT,
+  // perf-optimisation exports (new, tested in reader.test.js):
+  pruneNoise,
+  selectKeyFiles,
+  buildHuntPrompt,
+  SOURCE_EXTS,
+  NOISE_EXTS,
 };
