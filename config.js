@@ -21,7 +21,11 @@ const HISTORY_LIMIT = 200;
 const REPORT_LIMIT = 100;
 const AUDIO_ENABLED = process.env.STAGE_NO_AUDIO !== '1';
 const JOIN_URL = process.env.STAGE_JOIN_URL || 'https://imagineering.cc/stage';
-const OPENAI_API_KEY = process.env.STAGE_OPENAI_API_KEY || '';
+// STAGE_OPENAI_API_KEY (namespaced) wins; falls back to the canonical OPENAI_API_KEY
+// from ~/.claude/.env so the key is single-sourced rather than duplicated per project.
+// On the Pi the private systemd drop-in supplies STAGE_OPENAI_API_KEY (its deploy copy);
+// for local dev, `source ~/.claude/.env` exposes OPENAI_API_KEY and this picks it up.
+const OPENAI_API_KEY = process.env.STAGE_OPENAI_API_KEY || process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.STAGE_OPENAI_MODEL || 'gpt-5.4-mini';
 const GITHUB_TOKEN = process.env.STAGE_GITHUB_TOKEN || '';
 const SHOW_MODES = new Set(['welcome', 'free-jukebox', 'sprint-build', 'sprint-share', 'sprint-break', 'cool-down']);
