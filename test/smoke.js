@@ -2119,8 +2119,11 @@ test('publicSpotlight allowlist: public stream carries no host-only spotlight co
 // HOST-SHAPE-1. hostSpotlight() — the show-stream projection — MUST carry
 // every host-only field, proving the allowlist refactor did not silently drop
 // fields that the admin/room consumers rely on. This is the shape-preservation
-// invariant: sse-hub.js is not touched, so hostSpotlight()'s output must be
-// byte-identical (same field set) to before the refactor.
+// invariant: sse-hub.js is not touched, so hostSpotlight()'s output must keep
+// the SAME FIELD SET / SAME PARSED SHAPE as before the refactor. (JSON key
+// order may differ — consumers parse JSON, so order is immaterial.) This test
+// checks the live show stream at the NULL phase; PROJ-UNIT-2 below drives the
+// host-only fields to NON-NULL values and asserts they survive the projection.
 // ---------------------------------------------------------------------------
 test('hostSpotlight shape: show stream carries all required host-only fields after allowlist refactor', async () => {
   await openEvent('Host Shape Test');
@@ -2159,4 +2162,159 @@ test('hostSpotlight shape: show stream carries all required host-only fields aft
   assert.ok(!('spotlight' in pub), 'public stream still omits spotlight entirely');
 
   await post('/api/share/stop');
+});
+
+// ---------------------------------------------------------------------------
+// PROJ-UNIT-1 (THE REAL ALLOWLIST GUARD). The integration tests above can only
+// prove "the public /api/events stream omits spotlight" — they would STILL PASS
+// if someone put transcript/participantToken BACK into publicSpotlight(),
+// because sse-hub.js gates spotlight off the public payload entirely. So they
+// don't actually guard publicSpotlight()'s allowlist.
+//
+// This test calls publicSpotlight() DIRECTLY against a synthetic room.spotlight
+// in which EVERY field — including every host-only one — is populated with a
+// non-null value. It asserts the returned key set is EXACTLY the 9 allowlist
+// fields and that NO host-only field appears. It WILL FAIL if a host-only field
+// is ever added back to the allowlist (the spread-the-rest denylist regression).
+//
+// Uses a fresh require of state.js with a throwaway STAGE_STATE_FILE so it never
+// touches real state or the shared server child (mirrors the commit() unit).
+// ---------------------------------------------------------------------------
+test('projection unit: publicSpotlight() emits EXACTLY the 9-field allowlist and no host-only field', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-pubspot-'));
+  process.env.STAGE_STATE_FILE = path.join(dir, 'state.json');
+  delete require.cache[require.resolve('../config')];
+  delete require.cache[require.resolve('../state')];
+  const state = require('../state');
+
+  // A spotlight where EVERY field is populated — and every host-only field is a
+  // NON-NULL, recognizable value, so a leak would be unmistakable.
+  state.room.spotlight = {
+    id: 'spot-1',
+    eventId: 'evt-1',
+    active: true,
+    participantName: 'Indigo Heron',
+    projectTitle: 'A Real Project',
+    kind: 'introduction',
+    isFinal: true,
+    status: 'corrected',
+    startedAt: 1234567890,
+    // --- host-only fields, all NON-NULL ---
+    participantToken: 'SECRET-TOKEN-must-not-leak',
+    transcript: 'SECRET transcript words must not leak',
+    insights: { sources: [{ url: 'https://example.com' }], note: 'SECRET insight' },
+    facilitation: { status: 'asked', candidate: { quip: 'SECRET quip' } },
+    read: { status: 'ready', finding: 'SECRET reader finding', evidence: 'x' },
+  };
+
+  const pub = state.publicSpotlight();
+  assert.ok(pub, 'publicSpotlight() returns an object for a live spotlight');
+
+  // (a) The key set is EXACTLY the 9 allowlist fields — no more, no fewer.
+  const expected = ['id', 'eventId', 'active', 'participantName', 'projectTitle', 'kind', 'isFinal', 'status', 'startedAt'];
+  assert.deepEqual(Object.keys(pub).sort(), [...expected].sort(),
+    'publicSpotlight() key set is EXACTLY the 9 allowlist fields');
+
+  // (b) Every public field carries the value from room.spotlight (right subset, right values).
+  for (const k of expected) {
+    assert.deepEqual(pub[k], state.room.spotlight[k], `public field "${k}" preserved`);
+  }
+
+  // (c) NO host-only field appears — neither as a key nor (defensively) by value.
+  for (const hostOnly of ['participantToken', 'transcript', 'insights', 'facilitation', 'read']) {
+    assert.ok(!(hostOnly in pub), `publicSpotlight() does NOT carry host-only key "${hostOnly}"`);
+  }
+  const serialized = JSON.stringify(pub);
+  for (const secret of ['SECRET-TOKEN', 'SECRET transcript', 'SECRET insight', 'SECRET quip', 'SECRET reader']) {
+    assert.ok(!serialized.includes(secret), `serialized public projection contains no "${secret}"`);
+  }
+
+  // null spotlight -> null projection (the live-presence guard).
+  state.room.spotlight = null;
+  assert.equal(state.publicSpotlight(), null, 'publicSpotlight() returns null when no spotlight is live');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// PROJ-UNIT-2 (HOST NON-NULL SURVIVAL). The host-shape integration test only
+// checks the host-only KEYS exist at their NULL phase. A regression that always
+// serialized insights:null, or dropped a READY Reader `read` finding, would
+// still pass it. This test drives a spotlight where insights, facilitation, AND
+// read are NON-NULL real objects and asserts hostSpotlight() carries their
+// VALUES through unchanged (deep-equality against the expected host object).
+// Calls hostSpotlight() directly (same fresh-require pattern, no server child).
+// ---------------------------------------------------------------------------
+test('projection unit: hostSpotlight() preserves NON-NULL host-only field values', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stage-hostspot-'));
+  process.env.STAGE_STATE_FILE = path.join(dir, 'state.json');
+  delete require.cache[require.resolve('../config')];
+  delete require.cache[require.resolve('../state')];
+  const state = require('../state');
+
+  const insights = { sources: [{ url: 'https://example.com', sid: 's0' }], note: 'real insight', searchedAt: 99 };
+  const facilitation = { status: 'asked', candidate: { kind: 'quip', quip: 'a real question' }, cursor: 0, askedAt: 100 };
+  const read = { status: 'ready', finding: 'a real reader finding', evidence: 'commit abc', question: 'why?' };
+
+  state.room.spotlight = {
+    id: 'spot-2',
+    eventId: 'evt-2',
+    active: true,
+    participantName: 'Crimson Hare',
+    projectTitle: 'Another Project',
+    kind: 'progress',
+    isFinal: true,
+    status: 'ready',
+    startedAt: 222,
+    participantToken: 'tok-2',
+    transcript: 'the corrected transcript',
+    insights,
+    facilitation,
+    read,
+  };
+
+  const host = state.hostSpotlight();
+
+  // The host projection must carry the SAME FIELD SET / SAME PARSED SHAPE as the
+  // full host spotlight — assert by deep-equality against the expected object
+  // (key order is immaterial: deepEqual compares parsed shape, not byte order).
+  assert.deepEqual(host, {
+    // 9 allowlist (public-safe) fields:
+    id: 'spot-2',
+    eventId: 'evt-2',
+    active: true,
+    participantName: 'Crimson Hare',
+    projectTitle: 'Another Project',
+    kind: 'progress',
+    isFinal: true,
+    status: 'ready',
+    startedAt: 222,
+    // host-only fields, NON-NULL values preserved verbatim:
+    participantToken: 'tok-2',
+    transcript: 'the corrected transcript',
+    insights,
+    facilitation,
+    read,
+  }, 'hostSpotlight() carries every host-only field with its NON-NULL value preserved');
+
+  // Spot-check the three fields the integration test couldn't drive non-null:
+  // a regression that serialized them as null (or dropped a ready read) fails here.
+  assert.deepEqual(host.insights, insights, 'non-null insights survive into the host projection');
+  assert.deepEqual(host.facilitation, facilitation, 'non-null facilitation survives');
+  assert.deepEqual(host.read, read, 'a READY Reader finding survives (not dropped/nulled)');
+
+  // The ?? null fallback still applies when a host-only field is genuinely absent:
+  // a fresh spotlight with no insights/facilitation/read must project them as null.
+  state.room.spotlight = {
+    id: 'spot-3', eventId: 'evt-3', active: true, participantName: 'Saffron Lark',
+    projectTitle: 'P', kind: 'introduction', isFinal: false, status: 'listening',
+    startedAt: 333, participantToken: 'tok-3', transcript: '',
+    // insights / facilitation / read intentionally OMITTED (undefined)
+  };
+  const host2 = state.hostSpotlight();
+  assert.equal(host2.insights, null, 'absent insights project as null (?? fallback)');
+  assert.equal(host2.facilitation, null, 'absent facilitation projects as null (?? fallback)');
+  assert.equal(host2.read, null, 'absent read projects as null (?? fallback)');
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });

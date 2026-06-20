@@ -660,11 +660,14 @@ function publicSpotlight() {
 function hostSpotlight() {
   if (!room.spotlight) return null;
   // Start from the public-safe allowlist, then re-add every host-only field
-  // that the SHOW-stream (sse-hub.js) requires. This function's output shape
-  // must remain BYTE-IDENTICAL across this refactor: sse-hub.js is not
-  // touched and consumes hostSpotlight() directly. Any future field added to
-  // room.spotlight MUST be explicitly placed here or in publicSpotlight() —
-  // the denylist is gone; omission is now the safe default.
+  // that the SHOW-stream (sse-hub.js) requires. This function's output must
+  // preserve the SAME FIELD SET / SAME PARSED SHAPE across this refactor:
+  // sse-hub.js is not touched and consumes hostSpotlight() directly. (JSON key
+  // ORDER changed — the allowlist now emits isFinal/status/startedAt before the
+  // re-added transcript/insights/facilitation/read — but no SSE consumer depends
+  // on key order; they parse JSON.) Any future field added to room.spotlight
+  // MUST be explicitly placed here or in publicSpotlight() — the denylist is
+  // gone; omission is now the safe default.
   return {
     ...publicSpotlight(),
     participantToken: room.spotlight.participantToken,
@@ -676,17 +679,18 @@ function hostSpotlight() {
     // (It is NOT duplicated in the spread; the allowlist value wins.)
     //   isFinal: already present via publicSpotlight()
     // Insights (M1): GitHub/arXiv/OpenAlex research output; show-stream only.
-    insights:    room.spotlight.insights || null,
+    // `?? null` preserves a real value, defaulting only on null/undefined.
+    insights:    room.spotlight.insights ?? null,
     // Facilitation (M3) is always present on the wire — null until the autonomous
     // generation step writes it — so a frontend can read `spotlight.facilitation`
     // unconditionally (the 'ready != room-visible; status===asked is the gate'
     // contract; see ENGINE.md). Show-stream-only, like the rest of spotlight.
-    facilitation: room.spotlight.facilitation || null,
+    facilitation: room.spotlight.facilitation ?? null,
     // The Reader's finding (Two Minds, Slice 3) — the contained agentic repo read.
     // Always present on the wire, null until /api/share/admit fires the read; then
     // {status:'reading'} → {status:'ready', finding, evidence, question, ...} or
     // {status:'none'}. Show-stream-only (rides hostSpotlight, never publicSpotlight).
-    read: room.spotlight.read || null,
+    read: room.spotlight.read ?? null,
   };
 }
 
