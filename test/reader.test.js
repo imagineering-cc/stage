@@ -462,32 +462,38 @@ test('buildSpawn: FAIL-SAFE — default (no env) selects the SANDBOX cage, not d
   });
 });
 
-test('buildSpawn: DIRECT mode (digest default) spawns claude with cwd + childEnv and ZERO tools', () => {
+test('buildSpawn: DIRECT mode (digest default) — ZERO tools (--tools ""), neutral cwd, no project settings', () => {
   withSpawnEnv({ STAGE_READER_UNSAFE_DIRECT: '1', STAGE_READER_CLAUDE_BIN: '/opt/claude' }, () => {
     const childEnv = { HOME: '/h', PATH: '/bin' };
-    const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', childEnv, { prompt: 'DIGEST-PROMPT', agentic: false });
+    const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', childEnv, { prompt: 'DIGEST-PROMPT', agentic: false, neutralCwd: '/var/lib/stage-reader/clones/run1/home' });
     assert.equal(s.command, '/opt/claude');
     assert.equal(s.unit, null);
     assert.equal(s.stdinPrompt, null, 'direct mode passes prompt as argv, not stdin');
-    assert.equal(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/clone');
+    // CWD is the NEUTRAL dir, NEVER the attacker clone (no CLAUDE.md auto-discovery).
+    assert.equal(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/home');
+    assert.notEqual(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/clone');
     assert.deepEqual(s.spawnOpts.env, childEnv);
     assert.ok(s.args.includes('DIGEST-PROMPT'), 'the per-run prompt rides argv in direct mode');
-    // DIGEST default = ZERO tools: NO allowlist, and the read tools are disallowed too.
-    assert.ok(!s.args.includes('--allowedTools'), 'digest mode pins no tool allowlist');
-    const di = s.args.indexOf('--disallowedTools');
-    assert.ok(di !== -1, 'digest mode disallows tools explicitly');
-    assert.match(s.args[di + 1], /Read,Grep,Glob/, 'digest disallows the read tools too (zero tools)');
+    // ZERO tools via the authoritative `--tools ""` HARD pin (not a denylist).
+    const ti = s.args.indexOf('--tools');
+    assert.ok(ti !== -1, 'digest pins tools explicitly');
+    assert.equal(s.args[ti + 1], '', '--tools "" disables ALL tools');
+    assert.ok(!s.args.includes('--disallowedTools'), 'no fragile denylist');
+    // Project/local settings (the attacker clone CLAUDE.md/settings) are excluded.
+    const si = s.args.indexOf('--setting-sources');
+    assert.equal(s.args[si + 1], 'user', 'only user settings; no project/local from the clone');
     assert.ok(!s.args.includes('--bare'), 'never --bare (would prefer the API key)');
   });
 });
 
-test('buildSpawn: DIRECT mode AGENTIC fallback (agentic:true) restores the Read/Grep/Glob allowlist', () => {
+test('buildSpawn: DIRECT mode AGENTIC fallback (agentic:true) — Read/Grep/Glob tools, clone cwd', () => {
   withSpawnEnv({ STAGE_READER_UNSAFE_DIRECT: '1', STAGE_READER_CLAUDE_BIN: '/opt/claude' }, () => {
-    const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', { HOME: '/h' }, { prompt: reader.HUNT_PROMPT, agentic: true });
-    const ai = s.args.indexOf('--allowedTools');
-    assert.ok(ai !== -1, 'agentic mode restores an allowlist');
-    assert.equal(s.args[ai + 1], 'Read,Grep,Glob');
-    assert.ok(s.args.includes('--disallowedTools'), 'agentic still disallows the write/exec tools');
+    const cloneDir = '/var/lib/stage-reader/clones/run1/clone';
+    const s = reader.buildSpawn(cloneDir, { HOME: '/h' }, { prompt: reader.HUNT_PROMPT, agentic: true, neutralCwd: '/var/lib/stage-reader/clones/run1/home' });
+    const ti = s.args.indexOf('--tools');
+    assert.equal(s.args[ti + 1], 'Read,Grep,Glob', 'agentic uses the read tool set');
+    // Agentic reads the clone via tools, so cwd IS the clone (dev/CI-only path).
+    assert.equal(s.spawnOpts.cwd, cloneDir);
   });
 });
 
@@ -890,10 +896,51 @@ test('DIGEST_PROMPT stays in lockstep with the parseFinding output contract', ()
   assert.match(reader.DIGEST_PROMPT, /FILE: <path>/, 'digest prompt explains the FILE header citation');
 });
 
-test('claudeArgsDirect: digest pins zero tools; agentic restores the read allowlist', () => {
+test('claudeArgsDirect: digest pins --tools ""; agentic uses Read,Grep,Glob; both exclude project settings', () => {
   const digest = reader.claudeArgsDirect('P', false);
-  assert.ok(!digest.includes('--allowedTools'), 'digest: no allowlist');
-  assert.match(digest[digest.indexOf('--disallowedTools') + 1], /Read,Grep,Glob/, 'digest disallows read tools');
+  assert.ok(!digest.includes('--disallowedTools'), 'digest: no fragile denylist');
+  assert.equal(digest[digest.indexOf('--tools') + 1], '', 'digest: --tools "" disables all tools');
+  assert.equal(digest[digest.indexOf('--setting-sources') + 1], 'user', 'digest: no project/local settings');
   const agentic = reader.claudeArgsDirect('P', true);
-  assert.equal(agentic[agentic.indexOf('--allowedTools') + 1], 'Read,Grep,Glob', 'agentic: read allowlist');
+  assert.equal(agentic[agentic.indexOf('--tools') + 1], 'Read,Grep,Glob', 'agentic: read tool set');
+});
+
+test('buildDigest: byte budget is honoured for MULTI-BYTE content (UTF-8, not UTF-16)', () => {
+  // A file of 2-byte chars (é = 0xC3 0xA9). 100 chars = 200 UTF-8 bytes but only 100
+  // UTF-16 units — a naive .slice(0, budget) would overshoot the byte budget.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-utf8-'));
+  fs.writeFileSync(path.join(dir, 'accents.c'), 'é'.repeat(2000)); // 4000 UTF-8 bytes
+  const prev = process.env.STAGE_READER_DIGEST_MAX_BYTES;
+  process.env.STAGE_READER_DIGEST_MAX_BYTES = '100';
+  try {
+    const d = reader.buildDigest(dir, ['accents.c']);
+    assert.ok(d.truncatedAny, 'multi-byte file exceeds the tiny budget → truncated');
+    assert.ok(d.files[0].bytes <= 100, `bundled bytes (${d.files[0].bytes}) must respect the UTF-8 budget`);
+    // And the bundled text must itself be valid (no broken surrogate explosion).
+    assert.ok(Buffer.byteLength(d.body, 'utf8') >= d.files[0].bytes, 'body bytes are well-formed');
+  } finally {
+    if (prev === undefined) delete process.env.STAGE_READER_DIGEST_MAX_BYTES;
+    else process.env.STAGE_READER_DIGEST_MAX_BYTES = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('walkFiles: enforces the file-count cap within a single oversized directory', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-cap-'));
+  for (let i = 0; i < 50; i++) fs.writeFileSync(path.join(dir, `f${i}.c`), '//\n');
+  try {
+    const files = reader.walkFiles(dir, 10);
+    assert.ok(files.length <= 10, `cap respected inside one flat dir (got ${files.length})`);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('selectKeyFiles: a generated .pb.go file is treated as noise, not top source', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-gen-'));
+  fs.writeFileSync(path.join(dir, 'api.pb.go'), 'x'.repeat(9000)); // big but generated
+  fs.writeFileSync(path.join(dir, 'main.go'), '// real\npackage main\n');
+  try {
+    const keys = reader.selectKeyFiles(dir);
+    assert.ok(keys.includes('main.go'), 'real source selected');
+    assert.ok(!keys.includes('api.pb.go'), 'generated .pb.go excluded despite being larger');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

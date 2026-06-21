@@ -16,10 +16,13 @@ the repo content is whatever that account published — README, source, configs,
 all of it. Two distinct threats stack:
 
 1. **Prompt injection → bad finding text.** A hostile README can try to make the
-   model *say* something wrong. Mitigated in `reader.js` already: read-only tools
-   (`--allowedTools Read,Grep,Glob`), a defensively-parsed output contract, and
-   every cited path validated to exist inside the clone. The model can only
-   *speak*, never *act*. **This sandbox does not change that layer.**
+   model *say* something wrong. Mitigated in `reader.js` already: as of the digest
+   architecture (#15) the model runs with **ZERO tools** (`--tools ""`), the
+   repo bytes reach it only inside a per-call **nonce fence**, it runs from a
+   **neutral cwd** with `--setting-sources user` (so an attacker `CLAUDE.md` is not
+   auto-loaded), the output is a defensively-parsed contract, and every cited path is
+   validated to exist inside the clone. The model can only *speak*, never *act*.
+   **This sandbox does not change that layer.**
 
 2. **`claude`-CLI / runtime compromise → host RCE.** The real reason this slice
    exists. `reader.js` restricts the model's *tools*, but in the (opt-out) direct
@@ -76,10 +79,10 @@ sudo (NOPASSWD, two pinned helper paths: stage-reader-run + stage-reader-reap)
 /usr/local/sbin/stage-reader-run   (root-owned 0755, NOT writable by nick)
   │  validates cloneDir is under /var/lib/stage-reader/clones (realpath, no ../symlink)
   │  PINS: claude -p --input-format text --output-format json
-  │        --allowedTools Read,Grep,Glob
-  │        --disallowedTools Write,Edit,Bash,WebFetch,WebSearch --permission-mode dontAsk
+  │        --tools "" (ZERO tools; digest #15) --setting-sources user
+  │        --permission-mode dontAsk    [cwd = empty READER_HOME, NOT the clone]
   │  exec systemd-run --uid=stage-reader --gid=stage-reader --wait --pipe --collect
-  │                   --working-directory=<cloneDir>  <allowlist-fs + confinement set>
+  │                   --working-directory=<READER_HOME, empty>  <allowlist-fs + confinement set>
   ▼
 transient systemd unit "stage-reader-<clone>"   ← THE CAGE
   └── claude  (as stage-reader; allowlist fs; no caps; seccomp; egress 443+53 only)
