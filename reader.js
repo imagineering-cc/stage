@@ -249,7 +249,8 @@ const NOISE_SIZE_BYTES = numEnv('STAGE_READER_NOISE_MAX_BYTES', 100 * 1024); // 
 const KEY_FILE_LIMIT = numEnv('STAGE_READER_KEY_FILE_LIMIT', 5);
 
 // Recursively walk `dir`, returning [{relPath, size, ext, base, isSource}] for every
-// non-.git non-symlink file. Stops collecting once `cap` files have been seen.
+// non-.git non-symlink file. Stops at the FILE cap (`cap`) OR the visited-entry budget
+// (STAGE_READER_MAX_ENTRIES), whichever trips first — both bound traversal work.
 function walkFiles(dir, cap = 2000) {
   const results = [];
   const stack = [{ dir, prefix: '' }];
