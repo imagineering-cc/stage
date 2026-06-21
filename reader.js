@@ -261,27 +261,38 @@ function walkFiles(dir, cap = 2000) {
   let visited = 0;
   while (stack.length && results.length < cap && visited < entryCap) {
     const { dir: cur, prefix } = stack.pop();
-    let entries;
-    try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
-    for (const ent of entries) {
-      // Enforce BOTH caps INSIDE the loop (cage-match Carnot): the file cap for a flat
-      // dir of files, the entry cap for a flat dir of subdirectories.
-      if (results.length >= cap || visited >= entryCap) break;
-      visited++;
-      if (ent.name === '.git') continue;
-      if (ent.isSymbolicLink()) continue;
-      const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
-      if (ent.isDirectory()) {
-        stack.push({ dir: path.join(cur, ent.name), prefix: rel });
-      } else if (ent.isFile()) {
-        let size = 0;
-        try { size = fs.statSync(path.join(cur, ent.name)).size; } catch { /* vanished */ }
-        const ext = path.extname(ent.name).toLowerCase();
-        const base = ent.name.toLowerCase();
-        const isGenerated = GENERATED_SUFFIXES.some(s => base.endsWith(s));
-        const isSource = (SOURCE_EXTS.has(ext) || HIGH_SIGNAL_BASENAMES.has(base)) && !isGenerated;
-        results.push({ relPath: rel, size, ext, base, isSource, isGenerated });
+    // STREAM the directory with opendirSync/readSync, NOT readdirSync (cage-match
+    // Carnot round 3): readdirSync is EAGER — it materializes EVERY Dirent of a dir
+    // before we can check the budget, so a hostile flat dir of millions of files
+    // would allocate them all (and the 50MB clone cap sums file SIZES, so a million
+    // empty files passes it). Streaming reads one entry at a time and stops AT the
+    // budget boundary, before the whole directory is pulled into memory.
+    let dh;
+    try { dh = fs.opendirSync(cur); } catch { continue; }
+    try {
+      let ent;
+      while ((ent = dh.readSync()) !== null) {
+        // Enforce BOTH caps DURING iteration: the file cap for a flat dir of files,
+        // the entry cap for a flat dir of subdirectories (or a million-file fanout).
+        if (results.length >= cap || visited >= entryCap) break;
+        visited++;
+        if (ent.name === '.git') continue;
+        if (ent.isSymbolicLink()) continue;
+        const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+        if (ent.isDirectory()) {
+          stack.push({ dir: path.join(cur, ent.name), prefix: rel });
+        } else if (ent.isFile()) {
+          let size = 0;
+          try { size = fs.statSync(path.join(cur, ent.name)).size; } catch { /* vanished */ }
+          const ext = path.extname(ent.name).toLowerCase();
+          const base = ent.name.toLowerCase();
+          const isGenerated = GENERATED_SUFFIXES.some(s => base.endsWith(s));
+          const isSource = (SOURCE_EXTS.has(ext) || HIGH_SIGNAL_BASENAMES.has(base)) && !isGenerated;
+          results.push({ relPath: rel, size, ext, base, isSource, isGenerated });
+        }
       }
+    } finally {
+      try { dh.closeSync(); } catch { /* already closed / vanished */ }
     }
   }
   return results;
@@ -700,8 +711,8 @@ function cloneRepo(handle, repo, dest) {
 //   NOTE: deliberately NO `--bare` — it ignores CLAUDE_CODE_OAUTH_TOKEN and
 //   falls back to ANTHROPIC_API_KEY. Config isolation comes from the scoped
 //   HOME/CLAUDE_CONFIG_DIR (direct mode: childEnv; sandbox mode: the wrapper).
-// Direct mode passes the prompt as `-p <prompt>` argv (simplest for the local
-// dev/CI path); sandbox mode pipes the prompt via stdin (see buildSpawn / FIX B).
+// BOTH modes now pipe the prompt via STDIN (`--input-format text`): a 256KB digest
+// as a single argv arg would E2BIG (cage-match Carnot). Direct + sandbox are uniform.
 // `prompt` is the per-run prompt (digest prompt by default, HUNT_PROMPT in agentic
 // mode). `agentic` selects the tool set: DIGEST (default) pins ZERO tools — the bytes
 // are in the prompt, the model needs no filesystem access; AGENTIC (CI/dev opt-in)
@@ -741,8 +752,9 @@ function claudeArgsDirect(agentic) {
 //     NOT pass nick's childEnv or token through sudo (sudo strips env anyway).
 //     We hand `sudo` a clean minimal env (PATH) and NEVER ANTHROPIC_API_KEY.
 //     `stdinPrompt` is the trusted hunt prompt to write to the child's stdin.
-//   DIRECT (STAGE_READER_UNSAFE_DIRECT=1 — CI/dev): spawn `claude <args>` with
-//     cwd=cloneDir and the clean allowlist childEnv. Prompt is argv, stdin unused.
+//   DIRECT (STAGE_READER_UNSAFE_DIRECT=1 — CI/dev): spawn `claude <args>` with the
+//     clean childEnv, a NEUTRAL cwd (digest) or the clone (agentic), and the prompt
+//     piped via stdin (`stdinPrompt`), same as sandbox — E2BIG-proof for a big digest.
 //   Returns { command, args, spawnOpts, unit|null, stdinPrompt|null } — `unit` is
 //   the deterministic transient systemd unit name (sandbox only) so the kill-path
 //   can target it directly.

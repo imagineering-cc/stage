@@ -941,6 +941,24 @@ test('walkFiles: enforces the file-count cap within a single oversized directory
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('walkFiles: the entry budget bounds a single FLAT directory via streaming (not eager readdir)', () => {
+  // A hostile flat fanout: 40 files in ONE dir. The streaming opendir/readSync walk
+  // must stop at the entry budget DURING iteration, never materializing all 40.
+  // cage-match Carnot round 3 (readdirSync was eager).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-flat-'));
+  for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(dir, `f${i}.c`), '//\n');
+  const prev = process.env.STAGE_READER_MAX_ENTRIES;
+  process.env.STAGE_READER_MAX_ENTRIES = '8';
+  try {
+    const files = reader.walkFiles(dir, 2000); // file cap high; entry budget is the limiter
+    assert.ok(files.length <= 8, `flat fanout bounded by the entry budget (got ${files.length})`);
+  } finally {
+    if (prev === undefined) delete process.env.STAGE_READER_MAX_ENTRIES;
+    else process.env.STAGE_READER_MAX_ENTRIES = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('walkFiles: the entry budget bounds DIRECTORY fanout, not just file count', () => {
   // 20 subdirs each holding one file (40 entries total). A file-only cap would let all
   // 20 dir-frames onto the stack; the entry budget halts traversal early. cage-match r2.
