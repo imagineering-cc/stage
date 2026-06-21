@@ -253,15 +253,21 @@ const KEY_FILE_LIMIT = numEnv('STAGE_READER_KEY_FILE_LIMIT', 5);
 function walkFiles(dir, cap = 2000) {
   const results = [];
   const stack = [{ dir, prefix: '' }];
-  while (stack.length && results.length < cap) {
+  // Bound TOTAL visited entries (dirs + files), not just collected files (cage-match
+  // Carnot round 2): a tree of N empty SUBDIRECTORIES collects zero files, so a
+  // file-only cap would let an attacker push N dir-frames onto the stack unbounded.
+  // The entry budget caps traversal work regardless of how many entries are files.
+  const entryCap = numEnv('STAGE_READER_MAX_ENTRIES', 20000);
+  let visited = 0;
+  while (stack.length && results.length < cap && visited < entryCap) {
     const { dir: cur, prefix } = stack.pop();
     let entries;
     try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
     for (const ent of entries) {
-      // Enforce the file-count cap INSIDE the loop (cage-match Carnot MED): a single
-      // directory with >cap entries would otherwise push them all before the outer
-      // while re-checks, defeating the DoS guard for a flat attacker repo.
-      if (results.length >= cap) break;
+      // Enforce BOTH caps INSIDE the loop (cage-match Carnot): the file cap for a flat
+      // dir of files, the entry cap for a flat dir of subdirectories.
+      if (results.length >= cap || visited >= entryCap) break;
+      visited++;
       if (ent.name === '.git') continue;
       if (ent.isSymbolicLink()) continue;
       const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
@@ -341,9 +347,11 @@ function buildDigest(cloneDir, keyFiles) {
     let truncated = false;
     if (Buffer.byteLength(text, 'utf8') > remaining) {
       // Truncate by BYTES, not UTF-16 code units (cage-match: both reviewers). A
-      // multi-byte char straddling the cut becomes U+FFFD (≤3 bytes for the ≤3 bytes
-      // it replaces), so the result is a valid string whose byte length stays ≤ budget.
+      // multi-byte char straddling the cut decodes to U+FFFD, which RE-ENCODES to 3
+      // bytes — so the cut can overshoot `remaining` by up to 2 bytes (cage-match
+      // Carnot round 2). Trim until the re-encoded byte length actually fits (≤2 iters).
       text = Buffer.from(text, 'utf8').subarray(0, remaining).toString('utf8');
+      while (text && Buffer.byteLength(text, 'utf8') > remaining) text = text.slice(0, -1);
       truncated = true;
       truncatedAny = true;
     }
@@ -707,9 +715,14 @@ function cloneRepo(handle, repo, dest) {
 // `project`/`local` sources so an attacker clone's CLAUDE.md / settings.json is NOT
 // auto-loaded as a higher-precedence side input (cage-match Carnot HIGH: the unfenced
 // project-context channel) — defence-in-depth alongside the neutral cwd in buildSpawn.
-function claudeArgsDirect(prompt, agentic) {
+// The prompt is delivered via STDIN (`--input-format text`), NOT argv — a 256KB digest
+// as a single `-p <prompt>` argument would exceed Linux's per-arg limit (~128KB) and
+// fail spawn with E2BIG (cage-match Carnot). This also matches the sandbox path, which
+// has always piped the prompt via stdin. So direct + sandbox are now uniform.
+function claudeArgsDirect(agentic) {
   return [
-    '-p', prompt,
+    '-p',
+    '--input-format', 'text',
     '--output-format', 'json',
     '--tools', agentic ? 'Read,Grep,Glob' : '',
     '--setting-sources', 'user',
@@ -774,10 +787,11 @@ function buildSpawn(cloneDir, childEnv, opts = {}) {
   const neutralCwd = opts.neutralCwd || os.tmpdir();
   return {
     command: claudeBin(),
-    args: claudeArgsDirect(prompt, agentic),
-    spawnOpts: { cwd: agentic ? cloneDir : neutralCwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+    args: claudeArgsDirect(agentic),
+    // stdin is a PIPE so the prompt rides stdin (E2BIG-proof; see claudeArgsDirect).
+    spawnOpts: { cwd: agentic ? cloneDir : neutralCwd, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] },
     unit: null,
-    stdinPrompt: null,
+    stdinPrompt: prompt,
   };
 }
 

@@ -468,12 +468,15 @@ test('buildSpawn: DIRECT mode (digest default) — ZERO tools (--tools ""), neut
     const s = reader.buildSpawn('/var/lib/stage-reader/clones/run1/clone', childEnv, { prompt: 'DIGEST-PROMPT', agentic: false, neutralCwd: '/var/lib/stage-reader/clones/run1/home' });
     assert.equal(s.command, '/opt/claude');
     assert.equal(s.unit, null);
-    assert.equal(s.stdinPrompt, null, 'direct mode passes prompt as argv, not stdin');
+    // The prompt rides STDIN (E2BIG-proof), not argv — matching the sandbox path.
+    assert.equal(s.stdinPrompt, 'DIGEST-PROMPT', 'direct mode pipes the prompt via stdin');
+    assert.equal(s.spawnOpts.stdio[0], 'pipe', 'stdin is a pipe for the prompt');
+    assert.ok(!s.args.includes('DIGEST-PROMPT'), 'the prompt is NOT a single argv arg (would E2BIG)');
+    assert.ok(s.args.includes('--input-format') && s.args[s.args.indexOf('--input-format') + 1] === 'text', 'reads prompt from stdin');
     // CWD is the NEUTRAL dir, NEVER the attacker clone (no CLAUDE.md auto-discovery).
     assert.equal(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/home');
     assert.notEqual(s.spawnOpts.cwd, '/var/lib/stage-reader/clones/run1/clone');
     assert.deepEqual(s.spawnOpts.env, childEnv);
-    assert.ok(s.args.includes('DIGEST-PROMPT'), 'the per-run prompt rides argv in direct mode');
     // ZERO tools via the authoritative `--tools ""` HARD pin (not a denylist).
     const ti = s.args.indexOf('--tools');
     assert.ok(ti !== -1, 'digest pins tools explicitly');
@@ -896,12 +899,14 @@ test('DIGEST_PROMPT stays in lockstep with the parseFinding output contract', ()
   assert.match(reader.DIGEST_PROMPT, /FILE: <path>/, 'digest prompt explains the FILE header citation');
 });
 
-test('claudeArgsDirect: digest pins --tools ""; agentic uses Read,Grep,Glob; both exclude project settings', () => {
-  const digest = reader.claudeArgsDirect('P', false);
+test('claudeArgsDirect: digest pins --tools ""; agentic uses Read,Grep,Glob; both stdin + exclude project settings', () => {
+  const digest = reader.claudeArgsDirect(false);
   assert.ok(!digest.includes('--disallowedTools'), 'digest: no fragile denylist');
   assert.equal(digest[digest.indexOf('--tools') + 1], '', 'digest: --tools "" disables all tools');
   assert.equal(digest[digest.indexOf('--setting-sources') + 1], 'user', 'digest: no project/local settings');
-  const agentic = reader.claudeArgsDirect('P', true);
+  assert.equal(digest[digest.indexOf('--input-format') + 1], 'text', 'prompt comes from stdin, not argv');
+  assert.ok(!digest.some(a => a && a.length > 200), 'no giant prompt argv (E2BIG-proof)');
+  const agentic = reader.claudeArgsDirect(true);
   assert.equal(agentic[agentic.indexOf('--tools') + 1], 'Read,Grep,Glob', 'agentic: read tool set');
 });
 
@@ -911,13 +916,15 @@ test('buildDigest: byte budget is honoured for MULTI-BYTE content (UTF-8, not UT
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-utf8-'));
   fs.writeFileSync(path.join(dir, 'accents.c'), 'é'.repeat(2000)); // 4000 UTF-8 bytes
   const prev = process.env.STAGE_READER_DIGEST_MAX_BYTES;
-  process.env.STAGE_READER_DIGEST_MAX_BYTES = '100';
+  // ODD budgets force the cut INSIDE a 2-byte sequence — the case a naive
+  // subarray+toString overshoots (U+FFFD re-encodes to 3 bytes). cage-match Carnot r2.
   try {
-    const d = reader.buildDigest(dir, ['accents.c']);
-    assert.ok(d.truncatedAny, 'multi-byte file exceeds the tiny budget → truncated');
-    assert.ok(d.files[0].bytes <= 100, `bundled bytes (${d.files[0].bytes}) must respect the UTF-8 budget`);
-    // And the bundled text must itself be valid (no broken surrogate explosion).
-    assert.ok(Buffer.byteLength(d.body, 'utf8') >= d.files[0].bytes, 'body bytes are well-formed');
+    for (const budget of [99, 100, 101, 151]) {
+      process.env.STAGE_READER_DIGEST_MAX_BYTES = String(budget);
+      const d = reader.buildDigest(dir, ['accents.c']);
+      assert.ok(d.truncatedAny, `budget ${budget}: multi-byte file truncated`);
+      assert.ok(d.files[0].bytes <= budget, `budget ${budget}: bundled bytes (${d.files[0].bytes}) must NOT exceed`);
+    }
   } finally {
     if (prev === undefined) delete process.env.STAGE_READER_DIGEST_MAX_BYTES;
     else process.env.STAGE_READER_DIGEST_MAX_BYTES = prev;
@@ -932,6 +939,26 @@ test('walkFiles: enforces the file-count cap within a single oversized directory
     const files = reader.walkFiles(dir, 10);
     assert.ok(files.length <= 10, `cap respected inside one flat dir (got ${files.length})`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('walkFiles: the entry budget bounds DIRECTORY fanout, not just file count', () => {
+  // 20 subdirs each holding one file (40 entries total). A file-only cap would let all
+  // 20 dir-frames onto the stack; the entry budget halts traversal early. cage-match r2.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-fanout-'));
+  for (let i = 0; i < 20; i++) {
+    fs.mkdirSync(path.join(dir, `d${i}`));
+    fs.writeFileSync(path.join(dir, `d${i}`, 'f.c'), '//\n');
+  }
+  const prev = process.env.STAGE_READER_MAX_ENTRIES;
+  process.env.STAGE_READER_MAX_ENTRIES = '8';
+  try {
+    const files = reader.walkFiles(dir, 2000); // file cap high; entry cap is the limiter
+    assert.ok(files.length < 20, `entry budget halted traversal early (found ${files.length}/20)`);
+  } finally {
+    if (prev === undefined) delete process.env.STAGE_READER_MAX_ENTRIES;
+    else process.env.STAGE_READER_MAX_ENTRIES = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('selectKeyFiles: a generated .pb.go file is treated as noise, not top source', () => {
