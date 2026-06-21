@@ -69,6 +69,12 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+// The nonce fence (PR #38, cage-match-hardened) is the SAME wrapper research.js
+// uses for repo-derived evidence. The digest reader bundles attacker-controllable
+// repo bytes as prompt DATA, so it reuses the exact unforgeable-delimiter fence
+// rather than re-rolling one. fenceDirective names the per-call nonce in the
+// trusted region so the model knows which fence is real (see buildDigestPrompt).
+const { fenceUntrusted, fenceDirective } = require('./research');
 
 // ── tunables (env-overridable; safe production defaults) ─────────────────────
 // Kept local rather than in config.js: reader.js is not wired into the engine
@@ -141,6 +147,280 @@ function cloneTimeoutMs() { return numEnv('STAGE_READER_CLONE_TIMEOUT_MS', 30000
 function readTimeoutMs() { return numEnv('STAGE_READER_TIMEOUT_MS', 360000); }
 // Grace between SIGTERM and SIGKILL (mirrors sprint.js's chime guard idea).
 function killGraceMs() { return numEnv('STAGE_READER_KILL_GRACE_MS', 3000); }
+
+// ── digest mode (task #15) ───────────────────────────────────────────────────
+// THE PIVOT: instead of an agentic spawn that EXPLORES the clone via Read/Grep/Glob,
+// the SERVER reads the ≤N highest-signal files ITSELF (cheap I/O), bundles them into
+// ONE fenced digest, and runs a SINGLE no-tools `claude -p` synthesis.
+//
+// PERF (measured, not a flat multiple): the agentic read is ~140s; digest is ~15s on
+// small repos (~10× win, the common attendee case) but 1–3 MINUTES on a large/complex
+// repo — latency is dominated by model REASONING-TIME VARIANCE, not digest size (an
+// earlier "13× on microui" probe did NOT reproduce; a smaller digest ran SLOWER). So
+// the pivot stands on SECURITY + the small-repo win + simplicity, NOT a universal 13×.
+//
+// SECURITY is the unconditional win: (1) capability reduction — ZERO tools is a
+// strictly smaller attack surface than an agentic loop with file tools (the cage pins
+// `--tools ""`, so the model can't Read/Grep/network even if the fence were escaped);
+// (2) reuse — the digest rides the SAME nonce fence (research.fenceUntrusted, PR #38)
+// the evidence path already uses. See concept_reader_digest_architecture / ENGINE.
+//
+// Total byte budget for the digest (the bundled file bytes, before the fence). The
+// probe used ~50KB and it was plenty; 256KB is generous-but-bounded headroom for a
+// handful of key files. A repo whose signal exceeds this is truncated, not unbounded.
+function digestMaxBytes() { return numEnv('STAGE_READER_DIGEST_MAX_BYTES', 256 * 1024); }
+
+// Digest is the DEFAULT. The agentic file-tool read is retained ONLY as a
+// DIRECT-MODE (CI/dev) comparison/measurement path, behind an explicit opt-in —
+// the production CAGE pins ZERO tools, so agentic is structurally unavailable in the
+// sandbox (enforced in runReader: `agenticEnabled() && !sandboxEnabled()`).
+// NAMED TRADEOFF (not silent): a repo whose signal lives ONLY in a non-selected file
+// yields a null finding in production rather than falling back to a file-walk; the
+// mitigation is selectKeyFiles quality + the byte budget, and the security gain —
+// the cage cannot run file tools AT ALL — is the deliberate exchange.
+function agenticEnabled() { return process.env.STAGE_READER_AGENTIC === '1'; }
+
+// ── key-file selection (helpers harvested from PR #42; #42 itself is the wrong
+// architecture and is NOT merged — these pure helpers become the digest builder) ──
+
+// Extensions treated as source code (worth reading for the "eerie observation").
+const SOURCE_EXTS = new Set([
+  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
+  '.py', '.pyw',
+  '.go',
+  '.rs',
+  '.java', '.kt', '.kts',
+  '.rb',
+  '.c', '.cc', '.cpp', '.cxx', '.c++',
+  '.h', '.hh', '.hpp', '.hxx',
+  '.cs',
+  '.swift',
+  '.dart',
+  '.php',
+  '.lua',
+  '.ex', '.exs',
+  '.hs', '.lhs',
+  '.clj', '.cljs',
+  '.ml', '.mli',
+  '.scala',
+  '.sh', '.bash',
+  '.zig',
+  '.nim',
+]);
+
+// Files whose basenames (case-insensitive) are always high-signal regardless of ext.
+const HIGH_SIGNAL_BASENAMES = new Set([
+  'readme.md', 'readme', 'readme.txt', 'readme.rst',
+]);
+
+// Generated-file SUFFIXES that `path.extname` cannot catch — extname('x.pb.go') is
+// '.go', so a multi-part suffix must be matched on the basename (cage-match Carnot
+// LOW). Files matching these are treated as non-source generated noise even though
+// their final extension looks like source.
+const GENERATED_SUFFIXES = [
+  '.pb.go', '.pb.cc', '.pb.h', '_pb2.py', '_pb2_grpc.py',
+  '.g.dart', '.freezed.dart', '.min.js', '.min.css', '.bundle.js',
+];
+
+// Extensions whose files are NEVER worth reading (generated data, binary blobs,
+// compiled assets, package manifests). pruneNoise deletes these before the read.
+const NOISE_EXTS = new Set([
+  '.inl',
+  '.bin', '.dat', '.raw', '.blob',
+  '.pb',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.tga',
+  '.svg',
+  '.wasm',
+  '.so', '.dylib', '.dll', '.a', '.lib', '.obj', '.o',
+  '.pyc', '.pyo', '.pyd',
+  '.class',
+  '.jar', '.war', '.ear',
+  '.exe', '.elf',
+  '.zip', '.gz', '.tar', '.bz2', '.xz', '.7z', '.rar',
+  '.parquet', '.csv', '.tsv', '.sqlite', '.db',
+  '.mp3', '.mp4', '.wav', '.ogg', '.flac',
+]);
+
+// Max single-file size to keep (anything larger AND not a recognised source ext is
+// likely generated data). Source files above this are kept (logic lives in big files).
+const NOISE_SIZE_BYTES = numEnv('STAGE_READER_NOISE_MAX_BYTES', 100 * 1024); // 100KB
+
+// Maximum number of key files to bundle into the digest.
+const KEY_FILE_LIMIT = numEnv('STAGE_READER_KEY_FILE_LIMIT', 5);
+
+// Recursively walk `dir`, returning [{relPath, size, ext, base, isSource}] for every
+// non-.git non-symlink file. Stops at the FILE cap (`cap`) OR the visited-entry budget
+// (STAGE_READER_MAX_ENTRIES), whichever trips first — both bound traversal work.
+function walkFiles(dir, cap = 2000) {
+  const results = [];
+  const stack = [{ dir, prefix: '' }];
+  // Bound TOTAL visited entries (dirs + files), not just collected files (cage-match
+  // Carnot round 2): a tree of N empty SUBDIRECTORIES collects zero files, so a
+  // file-only cap would let an attacker push N dir-frames onto the stack unbounded.
+  // The entry budget caps traversal work regardless of how many entries are files.
+  const entryCap = numEnv('STAGE_READER_MAX_ENTRIES', 20000);
+  let visited = 0;
+  while (stack.length && results.length < cap && visited < entryCap) {
+    const { dir: cur, prefix } = stack.pop();
+    // STREAM the directory with opendirSync/readSync, NOT readdirSync (cage-match
+    // Carnot round 3): readdirSync is EAGER — it materializes EVERY Dirent of a dir
+    // before we can check the budget, so a hostile flat dir of millions of files
+    // would allocate them all (and the 50MB clone cap sums file SIZES, so a million
+    // empty files passes it). Streaming reads one entry at a time and stops AT the
+    // budget boundary, before the whole directory is pulled into memory.
+    let dh;
+    try { dh = fs.opendirSync(cur); } catch { continue; }
+    try {
+      let ent;
+      while ((ent = dh.readSync()) !== null) {
+        // Enforce BOTH caps DURING iteration: the file cap for a flat dir of files,
+        // the entry cap for a flat dir of subdirectories (or a million-file fanout).
+        if (results.length >= cap || visited >= entryCap) break;
+        visited++;
+        if (ent.name === '.git') continue;
+        if (ent.isSymbolicLink()) continue;
+        const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+        if (ent.isDirectory()) {
+          stack.push({ dir: path.join(cur, ent.name), prefix: rel });
+        } else if (ent.isFile()) {
+          let size = 0;
+          try { size = fs.statSync(path.join(cur, ent.name)).size; } catch { /* vanished */ }
+          const ext = path.extname(ent.name).toLowerCase();
+          const base = ent.name.toLowerCase();
+          const isGenerated = GENERATED_SUFFIXES.some(s => base.endsWith(s));
+          const isSource = (SOURCE_EXTS.has(ext) || HIGH_SIGNAL_BASENAMES.has(base)) && !isGenerated;
+          results.push({ relPath: rel, size, ext, base, isSource, isGenerated });
+        }
+      }
+    } finally {
+      try { dh.closeSync(); } catch { /* already closed / vanished */ }
+    }
+  }
+  return results;
+}
+
+// pruneNoise(cloneDir) — delete files that add tokens but no signal BEFORE the digest
+// is built. Returns {deleted, bytes}. Only removes unambiguous noise, never source.
+// Security note: cloneDir is always a server-controlled scratch path wiped entirely in
+// finally{}; deletion here just shrinks the candidate set the digest draws from.
+function pruneNoise(cloneDir) {
+  const files = walkFiles(cloneDir);
+  let deleted = 0;
+  let bytes = 0;
+  for (const { relPath, size, ext, isSource, isGenerated } of files) {
+    const isNoise = NOISE_EXTS.has(ext) || isGenerated || (!isSource && size > NOISE_SIZE_BYTES);
+    if (!isNoise) continue;
+    try {
+      fs.rmSync(path.join(cloneDir, relPath));
+      deleted++;
+      bytes += size;
+    } catch { /* already gone or permission issue; harmless */ }
+  }
+  return { deleted, bytes };
+}
+
+// selectKeyFiles(cloneDir) — return the ≤KEY_FILE_LIMIT relative paths of the
+// highest-signal source files, ordered by signal: README first (the author's own
+// framing), then largest source files (most logic lives in the biggest files). Pure:
+// reads metadata only. The byte BUDGET (buildDigest) is what actually bounds inclusion.
+function selectKeyFiles(cloneDir) {
+  const files = walkFiles(cloneDir);
+  const readme = files.find(f => HIGH_SIGNAL_BASENAMES.has(f.base));
+  const sources = files
+    .filter(f => f.isSource && !HIGH_SIGNAL_BASENAMES.has(f.base))
+    .sort((a, b) => b.size - a.size);
+  const ordered = [];
+  if (readme) ordered.push(readme.relPath);
+  for (const f of sources) {
+    if (ordered.length >= KEY_FILE_LIMIT) break;
+    ordered.push(f.relPath);
+  }
+  return ordered;
+}
+
+// buildDigest(cloneDir, keyFiles) — read the selected files (cheap I/O) and bundle
+// them into ONE labelled, byte-budgeted body. Each file gets a "----- FILE: <path>
+// -----" header (so the model can cite paths) and is truncated at the remaining
+// budget. Returns { body, files: [{path, bytes, truncated}], truncatedAny }. The body
+// is attacker-controllable repo bytes — buildDigestPrompt fences it; callers must NOT
+// place `body` outside the fence. Pure (modulo reads). Exported for unit tests.
+function buildDigest(cloneDir, keyFiles) {
+  const budget = digestMaxBytes();
+  let used = 0;
+  const parts = [];
+  const included = [];
+  let truncatedAny = false;
+  for (const rel of Array.isArray(keyFiles) ? keyFiles : []) {
+    if (used >= budget) break;
+    let raw;
+    try { raw = fs.readFileSync(path.join(cloneDir, rel), 'utf8'); } catch { continue; }
+    const remaining = budget - used;
+    let text = raw;
+    let truncated = false;
+    if (Buffer.byteLength(text, 'utf8') > remaining) {
+      // Truncate by BYTES, not UTF-16 code units (cage-match: both reviewers). A
+      // multi-byte char straddling the cut decodes to U+FFFD, which RE-ENCODES to 3
+      // bytes — so the cut can overshoot `remaining` by up to 2 bytes (cage-match
+      // Carnot round 2). Trim until the re-encoded byte length actually fits (≤2 iters).
+      text = Buffer.from(text, 'utf8').subarray(0, remaining).toString('utf8');
+      while (text && Buffer.byteLength(text, 'utf8') > remaining) text = text.slice(0, -1);
+      truncated = true;
+      truncatedAny = true;
+    }
+    const bytes = Buffer.byteLength(text, 'utf8');
+    parts.push(`----- FILE: ${rel}${truncated ? ' (truncated)' : ''} -----`, text);
+    used += bytes;
+    included.push({ path: rel, bytes, truncated });
+  }
+  return { body: parts.join('\n'), files: included, truncatedAny };
+}
+
+// DIGEST_PROMPT — the no-tools twin of HUNT_PROMPT. Same finding contract + output
+// JSON shape (parseFinding depends on it; a unit test pins they stay in lockstep),
+// but it tells the model the key files are provided BELOW as fenced data and it has
+// NO tools, so it reasons only from the bytes and cites paths from the FILE headers.
+const DIGEST_PROMPT = [
+  'You are reading a software repository as a sharp, careful senior engineer.',
+  "The repository's highest-signal files are provided BELOW as data — each file",
+  'begins with a "----- FILE: <path> -----" header. You have NO tools: reason only',
+  'from the bytes provided, and cite paths EXACTLY as they appear in those headers.',
+  '',
+  'Find the SINGLE thing the author would be STUNNED someone noticed on a careful',
+  'read — an inconsistency, a load-bearing TODO, a pattern that breaks its own',
+  'convention, a clever-but-fragile choice, an abstraction that leaks in exactly',
+  'one place. NOT a summary. NOT "I see you use X". The jaw-on-the-floor "how did',
+  'it notice THAT?" thing that a sharp senior dev would catch.',
+  '',
+  'Cite exact files (and line ranges where you can). If nothing genuinely',
+  'non-obvious exists, return {"finding": null} — a weak finding is worse than',
+  'none, and a confidently-wrong observation is the opposite of magic.',
+  '',
+  'Return ONLY a single JSON object, no prose around it, in exactly this shape:',
+  '{',
+  '  "finding": "<one or two sentences, the non-obvious specific observation>",',
+  '  "evidence": [{"path": "relative/path.ext", "lines": "10-24", "why": "<why this is the anchor>"}],',
+  '  "question": "<one inviting question — \'deliberate, or did it predate the pattern?\' energy>",',
+  '  "confidence": "high" | "medium" | "reach",',
+  '  "kind": "eerie-read"',
+  '}',
+  'evidence: 1 to 3 anchors, each citing a real file in this repo. lines is optional.',
+  'If you have nothing worth saying, return {"finding": null} and nothing else.',
+].join('\n');
+
+// buildDigestPrompt(digestBody) — wrap the (attacker-controllable) digest body in the
+// nonce fence and name the nonce in the trusted region. The repo bytes only ever
+// appear INSIDE the fence; DIGEST_PROMPT + fenceDirective(nonce) are the trusted
+// region the participant never controls. Pure + exported for unit tests.
+function buildDigestPrompt(digestBody) {
+  const { nonce, block } = fenceUntrusted(digestBody);
+  return [
+    DIGEST_PROMPT,
+    '',
+    fenceDirective(nonce),
+    '',
+    block,
+  ].join('\n');
+}
 
 // The hunt prompt — the amazement engine (PERSONA.md §"the eerie repo read").
 // Instruct Claude to find the SINGLE non-obvious thing, cite exact files, and
@@ -432,14 +712,32 @@ function cloneRepo(handle, repo, dest) {
 //   NOTE: deliberately NO `--bare` — it ignores CLAUDE_CODE_OAUTH_TOKEN and
 //   falls back to ANTHROPIC_API_KEY. Config isolation comes from the scoped
 //   HOME/CLAUDE_CONFIG_DIR (direct mode: childEnv; sandbox mode: the wrapper).
-// Direct mode passes the prompt as `-p <prompt>` argv (simplest for the local
-// dev/CI path); sandbox mode pipes the prompt via stdin (see buildSpawn / FIX B).
-function claudeArgsDirect() {
+// BOTH modes now pipe the prompt via STDIN (`--input-format text`): a 256KB digest
+// as a single argv arg would E2BIG (cage-match Carnot). Direct + sandbox are uniform.
+// `prompt` is the per-run prompt (digest prompt by default, HUNT_PROMPT in agentic
+// mode). `agentic` selects the tool set: DIGEST (default) pins ZERO tools — the bytes
+// are in the prompt, the model needs no filesystem access; AGENTIC (CI/dev opt-in)
+// uses the Read/Grep/Glob explore set. The SANDBOX path pins the same flags in the
+// wrapper (always digest/zero-tool), so this argv form is direct-mode only.
+//
+// `--tools ""` is the AUTHORITATIVE "disable all tools" form (claude --help: 'Use ""
+// to disable all tools') — a hard pin, NOT a denylist that depends on enumerating
+// current tool names (cage-match Carnot HIGH: a future built-in / MCP / omitted tool
+// would escape a `--disallowedTools` list). `--setting-sources user` excludes the
+// `project`/`local` sources so an attacker clone's CLAUDE.md / settings.json is NOT
+// auto-loaded as a higher-precedence side input (cage-match Carnot HIGH: the unfenced
+// project-context channel) — defence-in-depth alongside the neutral cwd in buildSpawn.
+// The prompt is delivered via STDIN (`--input-format text`), NOT argv — a 256KB digest
+// as a single `-p <prompt>` argument would exceed Linux's per-arg limit (~128KB) and
+// fail spawn with E2BIG (cage-match Carnot). This also matches the sandbox path, which
+// has always piped the prompt via stdin. So direct + sandbox are now uniform.
+function claudeArgsDirect(agentic) {
   return [
-    '-p', HUNT_PROMPT,
+    '-p',
+    '--input-format', 'text',
     '--output-format', 'json',
-    '--allowedTools', 'Read,Grep,Glob',
-    '--disallowedTools', 'Write,Edit,Bash,WebFetch,WebSearch',
+    '--tools', agentic ? 'Read,Grep,Glob' : '',
+    '--setting-sources', 'user',
     '--permission-mode', 'dontAsk',
   ];
 }
@@ -455,12 +753,15 @@ function claudeArgsDirect() {
 //     NOT pass nick's childEnv or token through sudo (sudo strips env anyway).
 //     We hand `sudo` a clean minimal env (PATH) and NEVER ANTHROPIC_API_KEY.
 //     `stdinPrompt` is the trusted hunt prompt to write to the child's stdin.
-//   DIRECT (STAGE_READER_UNSAFE_DIRECT=1 — CI/dev): spawn `claude <args>` with
-//     cwd=cloneDir and the clean allowlist childEnv. Prompt is argv, stdin unused.
+//   DIRECT (STAGE_READER_UNSAFE_DIRECT=1 — CI/dev): spawn `claude <args>` with the
+//     clean childEnv, a NEUTRAL cwd (digest) or the clone (agentic), and the prompt
+//     piped via stdin (`stdinPrompt`), same as sandbox — E2BIG-proof for a big digest.
 //   Returns { command, args, spawnOpts, unit|null, stdinPrompt|null } — `unit` is
 //   the deterministic transient systemd unit name (sandbox only) so the kill-path
 //   can target it directly.
-function buildSpawn(cloneDir, childEnv) {
+function buildSpawn(cloneDir, childEnv, opts = {}) {
+  const prompt = opts.prompt !== undefined ? opts.prompt : HUNT_PROMPT;
+  const agentic = opts.agentic === true;
   if (sandboxEnabled()) {
     // UNIQUE-PER-RUN unit name (cage-match round-2 MED). cloneDir is always
     // `<runDir>/clone`, so basename(cloneDir) === "clone" for EVERY run — a
@@ -487,24 +788,32 @@ function buildSpawn(cloneDir, childEnv) {
         stdio: ['pipe', 'pipe', 'pipe'],
       },
       unit,
-      stdinPrompt: HUNT_PROMPT,
+      stdinPrompt: prompt,
     };
   }
+  // CWD: digest runs from a NEUTRAL dir (never the attacker clone) so claude's
+  // CLAUDE.md auto-discovery has no attacker-controlled memory file in its ancestry
+  // (cage-match Carnot HIGH). The digest carries all the repo bytes; the model needs
+  // no clone access. AGENTIC mode (dev/CI only) still runs from the clone because the
+  // Read/Grep/Glob tools resolve relative to cwd. opts.neutralCwd is supplied by
+  // runReader (the empty scratch home); fall back to tmpdir for direct test callers.
+  const neutralCwd = opts.neutralCwd || os.tmpdir();
   return {
     command: claudeBin(),
-    args: claudeArgsDirect(),
-    spawnOpts: { cwd: cloneDir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+    args: claudeArgsDirect(agentic),
+    // stdin is a PIPE so the prompt rides stdin (E2BIG-proof; see claudeArgsDirect).
+    spawnOpts: { cwd: agentic ? cloneDir : neutralCwd, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] },
     unit: null,
-    stdinPrompt: null,
+    stdinPrompt: prompt,
   };
 }
 
 // ── the model run (spawn claude, bounded, parse, reap) ───────────────────────
 // Spawns claude read-only over the clone, captures stdout, enforces the wall
 // clock with SIGTERM→SIGKILL, and resolves to the parsed finding or null.
-function runClaude(cloneDir, childEnv) {
+function runClaude(cloneDir, childEnv, opts) {
   return new Promise((resolve) => {
-    const { command, args, spawnOpts, unit, stdinPrompt } = buildSpawn(cloneDir, childEnv);
+    const { command, args, spawnOpts, unit, stdinPrompt } = buildSpawn(cloneDir, childEnv, opts);
     // Cost-safety, second gate: the sudo/wrapper path must NEVER carry an API
     // key into the cage. buildChildEnv already threw if one is set in the server
     // env, but assert again on the literal env we hand the spawn (belt + braces).
@@ -694,7 +1003,36 @@ async function runReader({ handle, repo, spotlightId } = {}) {
       return { finding: null };
     }
 
-    const finding = await runClaude(cloneDir, childEnv);
+    // Mode selection. DIGEST is the default; AGENTIC is honoured ONLY in direct mode
+    // — the cage pins zero tools, so an agentic read is structurally impossible in the
+    // sandbox (and we never want the file-tool path on an untrusted repo in prod).
+    const agentic = agenticEnabled() && !sandboxEnabled();
+    let opts;
+    if (agentic) {
+      opts = { prompt: HUNT_PROMPT, agentic: true, neutralCwd: homeDir };
+    } else {
+      // Server-side digest: prune noise, pick the key files, bundle their bytes into
+      // ONE fenced prompt. The model then synthesises in a single no-tools inference.
+      pruneNoise(cloneDir);
+      const keyFiles = selectKeyFiles(cloneDir);
+      if (keyFiles.length === 0) {
+        console.error('[READER] digest: no source files selected; null finding');
+        return { finding: null };
+      }
+      const digest = buildDigest(cloneDir, keyFiles);
+      if (!digest.body) {
+        console.error('[READER] digest: empty body; null finding');
+        return { finding: null };
+      }
+      console.error(
+        `[READER] digest: ${digest.files.length} file(s), ` +
+        `${Buffer.byteLength(digest.body, 'utf8')} bytes` +
+        `${digest.truncatedAny ? ' (truncated to budget)' : ''}`,
+      );
+      opts = { prompt: buildDigestPrompt(digest.body), agentic: false, neutralCwd: homeDir };
+    }
+
+    const finding = await runClaude(cloneDir, childEnv, opts);
     return finding || { finding: null };
   } catch (err) {
     // The cost-safety assertion is the one thing we DO want to surface loudly —
@@ -735,4 +1073,12 @@ module.exports = {
   safeSegment,
   readOAuthToken,
   HUNT_PROMPT,
+  // digest mode (task #15) — pure helpers, unit-testable without a live spawn:
+  walkFiles,
+  pruneNoise,
+  selectKeyFiles,
+  buildDigest,
+  buildDigestPrompt,
+  claudeArgsDirect,
+  DIGEST_PROMPT,
 };

@@ -257,7 +257,13 @@ ARGS=(
   --pipe
   --collect
   --quiet
-  --working-directory="$REAL_CLONE"
+  # cwd is the EMPTY scratch HOME, NOT the attacker clone (cage-match Carnot HIGH):
+  # claude's CLAUDE.md auto-discovery walks UP from cwd, so a clone-rooted cwd would
+  # load an attacker CLAUDE.md as TRUSTED, unfenced context — an instruction channel
+  # around the digest fence. READER_HOME has no CLAUDE.md and the clone is its sibling
+  # (not an ancestor), so nothing attacker-controlled is auto-discovered. The digest
+  # carries all the repo bytes; the contained claude needs no clone access at all.
+  --working-directory="$READER_HOME"
   --property=KillMode=mixed
   --property=TimeoutStopSec=5
   --setenv=HOME="$READER_HOME"
@@ -334,8 +340,19 @@ ARGS+=(
     -p
     --input-format text
     --output-format json
-    --allowedTools Read,Grep,Glob
-    --disallowedTools Write,Edit,Bash,WebFetch,WebSearch
+    # DIGEST MODE (task #15): ZERO tools, pinned HARD. reader.js bundles the repo's
+    # key files into the fenced prompt it writes to our stdin, so the contained claude
+    # needs NO filesystem/network tools — it synthesises in a single inference from the
+    # bytes in the prompt. `--tools ""` is the AUTHORITATIVE "disable all tools" form
+    # (claude --help: 'Use "" to disable all tools') — a hard pin, NOT a denylist that
+    # depends on enumerating current tool names (cage-match Carnot HIGH: a future
+    # built-in / MCP / omitted tool would escape a --disallowedTools list).
+    # `--setting-sources user` excludes the project/local sources so an attacker
+    # clone's CLAUDE.md / settings.json cannot load as a side input (Carnot HIGH; the
+    # neutral cwd above is the primary guard, this is defence-in-depth). The clone
+    # bind-mount remains (harmless: no tools can read it) so the cage shape is unchanged.
+    --tools ""
+    --setting-sources user
     --permission-mode dontAsk
 )
 exec systemd-run "${ARGS[@]}"
