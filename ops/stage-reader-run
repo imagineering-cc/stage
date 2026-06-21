@@ -334,8 +334,14 @@ ARGS+=(
     -p
     --input-format text
     --output-format json
-    --allowedTools Read,Grep,Glob
-    --disallowedTools Write,Edit,Bash,WebFetch,WebSearch
+    # DIGEST MODE (task #15): ZERO tools. reader.js bundles the repo's key files into
+    # the fenced prompt it writes to our stdin, so the contained claude needs NO
+    # filesystem/network tools — it synthesises in a single inference from the bytes
+    # in the prompt. STRICTLY TIGHTER than the previous Read,Grep,Glob explore
+    # allowlist (capability reduction): the model cannot reach the clone, the network,
+    # or anything else even if the fence were escaped. The clone bind-mount remains
+    # (harmless: no tools can read it) so the cage shape is otherwise unchanged.
+    --disallowedTools Read,Grep,Glob,Write,Edit,Bash,WebFetch,WebSearch,Task,NotebookEdit
     --permission-mode dontAsk
 )
 exec systemd-run "${ARGS[@]}"
