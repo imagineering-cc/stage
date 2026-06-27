@@ -34,6 +34,7 @@ const {
   clearAnnouncement,
   commit,
   sseClients,
+  hooks,
 } = require('./state');
 const { broadcast, statePayload } = require('./sse-hub');
 const sprint = require('./sprint');
@@ -894,8 +895,20 @@ async function requestHandler(req, res) {
       archiveSpotlight();
       pruneShareEntry(body.token);
     })) return;
+    // THE VOICE speaks at BARGE-IN (Two Minds, Slice 4). Capture the Reader's
+    // finding + the trusted participant context BEFORE the ephemeral clear; fire
+    // AFTER the commit, NON-BLOCKING, so a slow OpenAI call can never block or
+    // break the host's finish response. performReaderVoice is silent unless the
+    // read is 'ready' with a finding, and is governed by voice.js restraint
+    // (budget/cooldown), so a finish with no/partial read simply says nothing.
+    const finishedRead = room.spotlight?.read || null;
+    const finishedCtx = {
+      participantName: room.spotlight?.participantName,
+      projectTitle: room.spotlight?.projectTitle,
+    };
     room.spotlight = null;     // ephemeral: cleared after the commit succeeds
     broadcast();
+    hooks.performReaderVoice(finishedRead, finishedCtx);
     return send(res, 200, { ok: true });
   }
 

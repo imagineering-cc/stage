@@ -28,6 +28,19 @@ const JOIN_URL = process.env.STAGE_JOIN_URL || 'https://imagineering.cc/stage';
 const OPENAI_API_KEY = process.env.STAGE_OPENAI_API_KEY || process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.STAGE_OPENAI_MODEL || 'gpt-5.4-mini';
 const GITHUB_TOKEN = process.env.STAGE_GITHUB_TOKEN || '';
+// The Voice's SPOKEN audio (Two Minds, Slice 4). Dreamfinder's text (OPENAI_MODEL)
+// is synthesized to speech by a TTS model and played through the SAME HDMI ALSA
+// device the music uses (mpv.js). `fable` is the British storyteller voice — chosen
+// for the red-bearded Victorian dreamer-inventor character. All env-overridable.
+const TTS_MODEL = process.env.STAGE_TTS_MODEL || 'gpt-4o-mini-tts';
+const TTS_VOICE = process.env.STAGE_TTS_VOICE || 'fable';
+const TTS_INSTRUCTIONS = process.env.STAGE_TTS_INSTRUCTIONS ||
+  'Warm, theatrical Victorian dreamer-inventor. Unhurried, a touch grandiose but ' +
+  'never pompous, with genuine wonder. Undercut the theatre with a wink.';
+// The ALSA device the spoken voice plays through — the SAME HDMI sink mpv.js pins
+// for music, so the voice comes out the TV. Single-sourced here; mpv.js's music
+// device is the literal twin (kept in sync deliberately).
+const VOICE_AUDIO_DEVICE = process.env.STAGE_VOICE_AUDIO_DEVICE || 'alsa/plughw:CARD=vc4hdmi0,DEV=0';
 const SHOW_MODES = new Set(['welcome', 'free-jukebox', 'sprint-build', 'sprint-share', 'sprint-break', 'cool-down']);
 
 // M5 personal-pulse bound. A guest gesture (phone shake / deliberate submit)
@@ -67,6 +80,10 @@ module.exports = {
   OPENAI_API_KEY,
   OPENAI_MODEL,
   GITHUB_TOKEN,
+  TTS_MODEL,
+  TTS_VOICE,
+  TTS_INSTRUCTIONS,
+  VOICE_AUDIO_DEVICE,
   SHOW_MODES,
   VISUAL_THEMES,
   GESTURE_COOLDOWN_MS,

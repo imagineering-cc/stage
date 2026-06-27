@@ -55,6 +55,12 @@ const hooks = {
   // that lets the sprint sequencer ride the ONE timer's end event (autonomous
   // phase advance) instead of owning a competing setTimeout. See sprint.js.
   onTimerEnded: () => {},
+  // The Voice (voice.js). currentUtterances() projects the ephemeral room.voice
+  // ring onto the SHOW stream (sse-hub); performReaderVoice() is fired by the
+  // spotlight-finish handler (routes) to speak the Reader's finding at barge-in.
+  // Inert (empty ring / no-op) until the composition root wires voice.js.
+  currentUtterances: () => [],
+  performReaderVoice: () => null,
 };
 
 // Guard against the silent-data-loss footgun: savePersistentState() serializes

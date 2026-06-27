@@ -57,6 +57,11 @@ function statePayload({ includeSpotlight = false } = {}) {
     // finish. This is the ONLY place token reaches the wire, and /api/show-events
     // is never public-proxied.
     payload.shareQueue = shareQueueProjection(true);
+    // The Voice's utterance ring (Two Minds, Slice 4). SHOW-stream ONLY — the
+    // performed line is derived from a participant's repo, so it stays off the
+    // public payload (the same privacy boundary as spotlight/transcript) until a
+    // deliberate clean-`text` promotion. [] when idle so consumers can .map.
+    payload.voice = state.hooks.currentUtterances();
   }
   return payload;
 }

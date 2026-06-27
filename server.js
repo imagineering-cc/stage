@@ -25,6 +25,10 @@ const { startMpv, listenMpvEvents, playNext } = require('./mpv');
 // sprint.js owns the autonomous Dreamfinder-hosted sprint sequencer. It rides
 // state.js's ONE timer via the late-bound onTimerEnded hook (wired below).
 const sprint = require('./sprint');
+// voice.js owns The Voice (Dreamfinder's spoken presence). Its ring projection
+// (currentUtterances) and the barge-in trigger (performReaderVoice) are reached
+// through state.hooks so reader-wire/routes/sse-hub never static-require it.
+const voice = require('./voice');
 const { requestHandler } = require('./routes');
 
 // --- composition root: wire state.js's late-bound cross-module hooks ---
@@ -44,6 +48,10 @@ state.wireHooks({
   // sprint subscribes to the timer-end event so a phase boundary autonomously
   // advances the session (duck/chime/announce/next). markTimerEnded() invokes it.
   onTimerEnded: sprint.onTimerEnded,
+  // The Voice: sse-hub projects the ring onto the show stream; the spotlight-finish
+  // handler fires performReaderVoice at barge-in to speak the Reader's finding.
+  currentUtterances: voice.currentUtterances,
+  performReaderVoice: voice.performReaderVoice,
 });
 
 sortQueue();

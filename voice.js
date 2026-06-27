@@ -55,6 +55,10 @@ const { room, cleanText } = state;
 // shared with research.js's modelInsights — the trust boundary is defined once.
 const { fetchRemote, fenceUntrusted, fenceDirective } = require('./research');
 const { pickNoRepoQuip } = require('./names');
+// The Voice made AUDIBLE: speakAloud() synthesizes the clean utterance text to
+// fable-voice speech and plays it through the TV's HDMI. Leaf dep (config only) —
+// no require cycle. Silent in CI/headless (STAGE_NO_AUDIO) and without a key.
+const { speakAloud } = require('./voice-audio');
 
 // ── tuning constants ──────────────────────────────────────────────────────────
 // The ring is small on purpose: the TV shows the FRESHEST line, and an unbounded
@@ -528,6 +532,52 @@ function currentUtterances(now = Date.now()) {
   return store.utterances.filter(u => !u.ttlMs || (now - u.createdAt) < u.ttlMs);
 }
 
+// ── the Reader→Voice seam (Two Minds, Slice 4) ─────────────────────────────────
+// The Reader (reader.js, contained) produces a finding on room.spotlight.read;
+// The Voice performs it in-character at barge-in. These two helpers are the seam.
+//
+// voicePayloadForRead(read, ctx) — PURE. Builds the speak() payload from a READY
+// read. The TRUST-BOUNDARY decision lives here and is unit-pinned: the Reader's
+// `finding` is repo-DERIVED (the contained claude synthesised it off an attacker-
+// asserted repo), so it flows into the FENCED `excerpt` slot (untrusted, nonce-
+// fenced in buildPrompt) — NEVER into the trusted `context` region that is
+// interpolated outside the fence. The operator-supplied participant name/title
+// (trusted, not repo-derived) are the only things in context. A low-confidence
+// finding is marked a 'reach' so PERSONA's "I might be wrong, but —" hedge fires.
+function voicePayloadForRead(read, ctx = {}) {
+  const finding = read && typeof read.finding === 'string' ? read.finding : '';
+  return {
+    findings: finding
+      ? [{ sourceKind: 'repo-read', title: (read && read.repo) || 'their repository', excerpt: finding }]
+      : [],
+    context: {
+      participantName: ctx.participantName || null,
+      projectTitle: ctx.projectTitle || null,
+    },
+    confidence: read && read.confidence === 'low' ? 'reach' : undefined,
+  };
+}
+
+// performReaderVoice(read, ctx) — the fire-and-forget trigger called from the
+// spotlight-finish handler (barge-in). SILENT unless the read is genuinely 'ready'
+// with a finding (PERSONA: he speaks only when he has something specific to be
+// RIGHT about; a 'reading'/'none'/null read is the fuse, not the firework). Returns
+// the speak() promise (utterance or null) so callers/tests can await; NEVER throws —
+// a slow/failed model call degrades inside speak() and any rejection is swallowed so
+// it can never break the host's finish response.
+function performReaderVoice(read, ctx = {}) {
+  if (!read || read.status !== 'ready' || !read.finding) return null;
+  return speak('facilitation', voicePayloadForRead(read, ctx))
+    .then(utterance => {
+      // SPEAK IT ALOUD through the TV. Fire-and-forget (speakAloud never throws and
+      // is silent in CI / without a key), and only the CLEAN performed text is voiced
+      // — never raw findings — because utterance.text is the fence+echo-guarded line.
+      if (utterance && utterance.text) speakAloud(utterance.text);
+      return utterance;
+    })
+    .catch(err => { console.error('[VOICE] performReaderVoice failed:', err.message); return null; });
+}
+
 module.exports = {
   speak,
   shouldSpeak,
@@ -542,6 +592,8 @@ module.exports = {
   recordToRing,
   fallbackUtterance,
   currentUtterances,
+  voicePayloadForRead,
+  performReaderVoice,
   voiceStore,
   // constants the tests pin
   REGISTER,
