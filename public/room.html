@@ -2416,8 +2416,12 @@
     }
     voiceCaptionEl.textContent = line;                 // textContent: XSS-safe
     voiceCaptionEl.style.opacity = '1';
+    // Hold the caption roughly as long as the line takes to SPEAK — a long finding
+    // is ~30s of fable speech, so a fixed 13s used to fade mid-sentence. ~75ms/char
+    // tracks the speech pace; clamp to a sane [12s, 48s] window.
+    const holdMs = Math.min(48000, Math.max(12000, line.length * 75));
     clearTimeout(voiceCaptionTimer);
-    voiceCaptionTimer = setTimeout(() => { if (voiceCaptionEl) voiceCaptionEl.style.opacity = '0'; }, 13000);
+    voiceCaptionTimer = setTimeout(() => { if (voiceCaptionEl) voiceCaptionEl.style.opacity = '0'; }, holdMs);
   }
 
   function renderSpotlight(nextSpotlight) {
